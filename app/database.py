@@ -35,7 +35,12 @@ def init_db() -> None:
             equipment TEXT,
             safety_notes TEXT,
             is_active INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            instructions TEXT,
+            contraindications TEXT,
+            weight_increment_kg DECIMAL,
+            progression_type TEXT DEFAULT 'reps_then_weight',
+            rep_progression_enabled BOOLEAN DEFAULT 1
         );
 
         CREATE TABLE IF NOT EXISTS routines (
@@ -102,6 +107,37 @@ def init_db() -> None:
             UNIQUE (user_id, date)
         );
 
+        CREATE TABLE IF NOT EXISTS exercise_substitutions (
+            id TEXT PRIMARY KEY,
+            exercise_id TEXT NOT NULL,
+            alternative_exercise_id TEXT NOT NULL,
+            priority INTEGER NOT NULL DEFAULT 1,
+            reason TEXT,
+            same_muscle BOOLEAN NOT NULL DEFAULT 0,
+            same_movement_pattern BOOLEAN NOT NULL DEFAULT 0,
+            is_active BOOLEAN NOT NULL DEFAULT 1,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (exercise_id) REFERENCES exercises(id),
+            FOREIGN KEY (alternative_exercise_id) REFERENCES exercises(id),
+            UNIQUE (exercise_id, alternative_exercise_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS workout_exercise_substitutions (
+            id TEXT PRIMARY KEY,
+            workout_log_id TEXT NOT NULL,
+            original_exercise_id TEXT NOT NULL,
+            substitute_exercise_id TEXT NOT NULL,
+            reason TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (workout_log_id)
+                REFERENCES workout_logs(id) ON DELETE CASCADE,
+            FOREIGN KEY (original_exercise_id)
+                REFERENCES exercises(id),
+            FOREIGN KEY (substitute_exercise_id)
+                REFERENCES exercises(id),
+            UNIQUE (workout_log_id, original_exercise_id)
+        );
+
         CREATE INDEX IF NOT EXISTS idx_routines_user
             ON routines(user_id);
 
@@ -116,6 +152,63 @@ def init_db() -> None:
 
         CREATE INDEX IF NOT EXISTS idx_body_metrics_user_date
             ON body_metrics(user_id, date DESC);
+
+        CREATE INDEX IF NOT EXISTS idx_exercise_substitutions_exercise
+            ON exercise_substitutions(exercise_id, priority);
+
+        CREATE INDEX IF NOT EXISTS idx_workout_substitutions_workout
+            ON workout_exercise_substitutions(workout_log_id);
+        """
+    )
+
+    # Compatibilidad con bases de datos creadas con versiones
+    # anteriores del esquema.
+    exercise_columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(exercises)").fetchall()
+    }
+
+    missing_columns = [
+        (
+            "instructions",
+            "ALTER TABLE exercises ADD COLUMN instructions TEXT",
+        ),
+        (
+            "contraindications",
+            "ALTER TABLE exercises ADD COLUMN contraindications TEXT",
+        ),
+        (
+            "weight_increment_kg",
+            "ALTER TABLE exercises ADD COLUMN weight_increment_kg DECIMAL",
+        ),
+        (
+            "progression_type",
+            "ALTER TABLE exercises ADD COLUMN progression_type TEXT",
+        ),
+        (
+            "rep_progression_enabled",
+            "ALTER TABLE exercises ADD COLUMN rep_progression_enabled BOOLEAN",
+        ),
+    ]
+
+    for column_name, statement in missing_columns:
+        if column_name not in exercise_columns:
+            conn.execute(statement)
+
+    # Valores por defecto para ejercicios existentes.
+    conn.execute(
+        """
+        UPDATE exercises
+        SET progression_type = 'reps_then_weight'
+        WHERE progression_type IS NULL
+        """
+    )
+
+    conn.execute(
+        """
+        UPDATE exercises
+        SET rep_progression_enabled = 1
+        WHERE rep_progression_enabled IS NULL
         """
     )
 

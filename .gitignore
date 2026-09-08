@@ -6,3 +6,4 @@ data/*.db
 data/*.sqlite
 data/*.sqlite3
 .pytest_cache/
+app/*.db

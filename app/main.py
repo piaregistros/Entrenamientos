@@ -4720,3 +4720,6 @@ def update_workout(
     conn.close()
 
     return dict(row)
+
+from app.workout_history_routes import router as workout_history_router
+app.include_router(workout_history_router)

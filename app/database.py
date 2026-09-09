@@ -24,6 +24,7 @@ def init_db() -> None:
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
             email TEXT,
+            role TEXT NOT NULL DEFAULT 'user',
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
 
@@ -153,11 +154,113 @@ def init_db() -> None:
         CREATE INDEX IF NOT EXISTS idx_body_metrics_user_date
             ON body_metrics(user_id, date DESC);
 
+        CREATE TABLE IF NOT EXISTS body_measurements (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            date TEXT NOT NULL,
+            waist_cm REAL,
+            chest_cm REAL,
+            arm_left_cm REAL,
+            arm_right_cm REAL,
+            thigh_left_cm REAL,
+            thigh_right_cm REAL,
+            hip_cm REAL,
+            neck_cm REAL,
+            notes TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id),
+            UNIQUE (user_id, date)
+        );
+
+        CREATE TABLE IF NOT EXISTS body_photos (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            date TEXT NOT NULL,
+            month_key TEXT NOT NULL,
+            angle TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id),
+            UNIQUE (user_id, month_key, angle)
+        );
+
+        CREATE TABLE IF NOT EXISTS user_goals (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            goal_type TEXT NOT NULL,
+            title TEXT NOT NULL,
+            description TEXT,
+            start_date TEXT,
+            target_date TEXT,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS progress_notes (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            workout_log_id TEXT,
+            date TEXT NOT NULL,
+            energy INTEGER,
+            satisfaction INTEGER,
+            effort INTEGER,
+            motivation INTEGER,
+            recovery INTEGER,
+            soreness INTEGER,
+            notes TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id),
+            FOREIGN KEY (workout_log_id)
+                REFERENCES workout_logs(id)
+                ON DELETE SET NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_body_measurements_user_date
+            ON body_measurements(user_id, date DESC);
+
+        CREATE INDEX IF NOT EXISTS idx_body_photos_user_month
+            ON body_photos(user_id, month_key);
+
+        CREATE INDEX IF NOT EXISTS idx_user_goals_user_active
+            ON user_goals(user_id, is_active);
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_progress_notes_workout
+            ON progress_notes(user_id, workout_log_id)
+            WHERE workout_log_id IS NOT NULL;
+
         CREATE INDEX IF NOT EXISTS idx_exercise_substitutions_exercise
             ON exercise_substitutions(exercise_id, priority);
 
         CREATE INDEX IF NOT EXISTS idx_workout_substitutions_workout
             ON workout_exercise_substitutions(workout_log_id);
+        CREATE TABLE IF NOT EXISTS user_credentials (
+            user_id TEXT PRIMARY KEY,
+            password_hash TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            must_change_password INTEGER NOT NULL DEFAULT 1,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS auth_sessions (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            token_hash TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            revoked_at TEXT,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_auth_sessions_token_hash
+            ON auth_sessions(token_hash);
+
+        CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_id
+            ON auth_sessions(user_id);
+
+        CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires_at
+            ON auth_sessions(expires_at);
         """
     )
 
@@ -193,6 +296,44 @@ def init_db() -> None:
 
     for column_name, statement in missing_columns:
         if column_name not in exercise_columns:
+            conn.execute(statement)
+
+    # Compatibilidad con bases de datos creadas antes de
+    # la ampliación de body_metrics para composición corporal.
+    body_metric_columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(body_metrics)").fetchall()
+    }
+
+    body_metric_missing_columns = [
+        (
+            "body_fat_pct",
+            "ALTER TABLE body_metrics ADD COLUMN body_fat_pct REAL",
+        ),
+        (
+            "muscle_mass_kg",
+            "ALTER TABLE body_metrics ADD COLUMN muscle_mass_kg REAL",
+        ),
+        (
+            "water_pct",
+            "ALTER TABLE body_metrics ADD COLUMN water_pct REAL",
+        ),
+        (
+            "visceral_fat",
+            "ALTER TABLE body_metrics ADD COLUMN visceral_fat REAL",
+        ),
+        (
+            "basal_metabolic_rate_kcal",
+            "ALTER TABLE body_metrics ADD COLUMN basal_metabolic_rate_kcal REAL",
+        ),
+        (
+            "bone_mass_kg",
+            "ALTER TABLE body_metrics ADD COLUMN bone_mass_kg REAL",
+        ),
+    ]
+
+    for column_name, statement in body_metric_missing_columns:
+        if column_name not in body_metric_columns:
             conn.execute(statement)
 
     # Valores por defecto para ejercicios existentes.

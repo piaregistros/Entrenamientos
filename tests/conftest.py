@@ -12,6 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from app.main import app
 from app import database
+from app.auth import create_password_hash
 
 
 # =========================================================
@@ -256,12 +257,32 @@ def test_db(tmp_path, monkeypatch):
 
     conn.executemany(
         """
-        INSERT INTO users (id, name, email)
-        VALUES (?, ?, ?)
+        INSERT INTO users (id, name, email, role)
+        VALUES (?, ?, ?, ?)
         """,
         [
-            (PABLO_ID, "Pablo", "pablo@test.local"),
-            (ESTEFI_ID, "Estefi", "estefi@test.local"),
+            (PABLO_ID, "Pablo", "pablo@test.local", "admin"),
+            (ESTEFI_ID, "Estefi", "estefi@test.local", "user"),
+        ],
+    )
+
+    # -----------------------------------------------------
+    # Credenciales de prueba
+    # -----------------------------------------------------
+
+    conn.executemany(
+        """
+        INSERT INTO user_credentials (
+            user_id,
+            password_hash,
+            updated_at,
+            must_change_password
+        )
+        VALUES (?, ?, datetime('now'), 0)
+        """,
+        [
+            (PABLO_ID, create_password_hash("test-pablo-password")),
+            (ESTEFI_ID, create_password_hash("test-estefi-password")),
         ],
     )
 
@@ -518,13 +539,62 @@ def test_db(tmp_path, monkeypatch):
     return db_path
 
 
+def _login_client(test_client, name, password):
+    response = test_client.post(
+        "/api/auth/login",
+        json={
+            "name": name,
+            "password": password,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+
+    data = response.json()
+    assert data["must_change_password"] is False
+
+    csrf_token = test_client.cookies.get("entrenamiento_csrf")
+    assert csrf_token, "El login no creó la cookie CSRF"
+
+    test_client.headers.update({
+        "X-CSRF-Token": csrf_token,
+    })
+
+    return test_client
+
+
 @pytest.fixture
-def client(test_db):
+def client_pablo(test_db):
     """
-    Cliente HTTP utilizando exclusivamente la BD temporal.
+    Cliente autenticado como Pablo (admin).
     """
     with TestClient(app) as test_client:
-        yield test_client
+        yield _login_client(
+            test_client,
+            "Pablo",
+            "test-pablo-password",
+        )
+
+
+@pytest.fixture
+def client_estefi(test_db):
+    """
+    Cliente autenticado como Estefi (user).
+    """
+    with TestClient(app) as test_client:
+        yield _login_client(
+            test_client,
+            "Estefi",
+            "test-estefi-password",
+        )
+
+
+@pytest.fixture
+def client(client_pablo):
+    """
+    Compatibilidad: los tests existentes utilizan Pablo.
+    """
+    return client_pablo
 
 
 @pytest.fixture

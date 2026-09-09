@@ -2,8 +2,13 @@ __pycache__/
 *.py[cod]
 .venv/
 .env
-data/*.db
-data/*.sqlite
-data/*.sqlite3
 .pytest_cache/
+
+# Base de datos y datos locales
+data/
+
+# Bases de datos SQLite si aparecen fuera de data/
 app/*.db
+
+# Backups temporales creados durante desarrollo
+*.pre-*

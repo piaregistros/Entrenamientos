@@ -1,14 +1,52 @@
 import uuid
-from fastapi import FastAPI, HTTPException
+from pathlib import Path
+
+from fastapi import Depends, FastAPI, HTTPException, File, UploadFile, Query
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from .database import get_connection, init_db
+from .auth_routes import router as auth_router
+from .auth import (
+    get_authenticated_user,
+    require_admin,
+    resolve_target_user,
+    validate_csrf_token,
+    CSRF_COOKIE_NAME,
+)
 
 
 app = FastAPI(
     title="Entrenamiento",
     version="0.1.0",
 )
+
+app.include_router(auth_router)
+
+
+@app.middleware("http")
+async def csrf_protection_middleware(request, call_next):
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+        path = request.url.path
+
+        # Login no necesita CSRF porque todavía no existe sesión.
+        # Health tampoco necesita protección.
+        if path not in {"/api/auth/login", "/health"}:
+            session_cookie = request.cookies.get("entrenamiento_session")
+
+            if session_cookie:
+                cookie_token = request.cookies.get(CSRF_COOKIE_NAME)
+                header_token = request.headers.get("X-CSRF-Token")
+
+                if not validate_csrf_token(cookie_token, header_token):
+                    from fastapi.responses import JSONResponse
+
+                    return JSONResponse(
+                        status_code=403,
+                        content={"detail": "CSRF validation failed"},
+                    )
+
+    return await call_next(request)
 
 
 @app.on_event("startup")
@@ -22,7 +60,9 @@ def health():
 
 
 @app.get("/api/users")
-def get_users():
+def get_users(current_user = Depends(get_authenticated_user)):
+    require_admin(current_user)
+
     conn = get_connection()
 
     rows = conn.execute(
@@ -39,29 +79,24 @@ def get_users():
 
 
 @app.get("/api/routines")
-def get_routines(user_id: str | None = None):
+def get_routines(
+    user_id: str | None = None,
+    current_user = Depends(get_authenticated_user),
+):
+    target_user_id = resolve_target_user(current_user, user_id)
+
     conn = get_connection()
 
-    if user_id:
-        rows = conn.execute(
-            """
-            SELECT id, user_id, name, day_order, is_active, created_at
-            FROM routines
-            WHERE user_id = ?
-              AND is_active = 1
-            ORDER BY day_order
-            """,
-            (user_id,),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            """
-            SELECT id, user_id, name, day_order, is_active, created_at
-            FROM routines
-            WHERE is_active = 1
-            ORDER BY user_id, day_order
-            """
-        ).fetchall()
+    rows = conn.execute(
+        """
+        SELECT id, user_id, name, day_order, is_active, created_at
+        FROM routines
+        WHERE user_id = ?
+          AND is_active = 1
+        ORDER BY day_order
+        """,
+        (target_user_id,),
+    ).fetchall()
 
     conn.close()
 
@@ -69,7 +104,10 @@ def get_routines(user_id: str | None = None):
 
 
 @app.get("/api/routines/{routine_id}")
-def get_routine(routine_id: str):
+def get_routine(
+    routine_id: str,
+    current_user = Depends(get_authenticated_user),
+):
     conn = get_connection()
 
     routine = conn.execute(
@@ -90,6 +128,13 @@ def get_routine(routine_id: str):
     ).fetchone()
 
     if routine is None:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Rutina no encontrada")
+
+    if (
+        current_user["role"] != "admin"
+        and routine["user_id"] != current_user["id"]
+    ):
         conn.close()
         raise HTTPException(status_code=404, detail="Rutina no encontrada")
 
@@ -130,7 +175,13 @@ def get_routine(routine_id: str):
 
 
 @app.get("/api/routines/{routine_id}/with-last-performance")
-def get_routine_with_last_performance(routine_id: str, user_id: str):
+def get_routine_with_last_performance(
+    routine_id: str,
+    user_id: str | None = None,
+    current_user = Depends(get_authenticated_user),
+):
+    target_user_id = resolve_target_user(current_user, user_id)
+
     conn = get_connection()
 
     # -----------------------------------------------------
@@ -141,7 +192,7 @@ def get_routine_with_last_performance(routine_id: str, user_id: str):
         SELECT id, name
         FROM users
         WHERE id = ?
-    """, (user_id,)).fetchone()
+    """, (target_user_id,)).fetchone()
 
     if not user:
         conn.close()
@@ -166,7 +217,7 @@ def get_routine_with_last_performance(routine_id: str, user_id: str):
         WHERE id = ?
           AND user_id = ?
           AND is_active = 1
-    """, (routine_id, user_id)).fetchone()
+    """, (routine_id, target_user_id)).fetchone()
 
     if not routine:
         conn.close()
@@ -236,7 +287,7 @@ def get_routine_with_last_performance(routine_id: str, user_id: str):
             ORDER BY wl.date DESC
             LIMIT 1
         """, (
-            user_id,
+            target_user_id,
             exercise["exercise_id"],
         )).fetchone()
 
@@ -326,7 +377,7 @@ def get_routine_with_last_performance(routine_id: str, user_id: str):
                 ORDER BY wl.date DESC
                 LIMIT 1
             """, (
-                user_id,
+                target_user_id,
                 substitution["alternative_exercise_id"],
             )).fetchone()
 
@@ -503,12 +554,51 @@ class BodyMetricCreate(BaseModel):
     user_id: str
     date: str
     weight_kg: float
+    body_fat_pct: float | None = None
+    muscle_mass_kg: float | None = None
+    water_pct: float | None = None
+    visceral_fat: float | None = None
+    basal_metabolic_rate_kcal: float | None = None
+    bone_mass_kg: float | None = None
     notes: str | None = None
 
 
 class BodyMetricUpdate(BaseModel):
     date: str
     weight_kg: float
+    body_fat_pct: float | None = None
+    muscle_mass_kg: float | None = None
+    water_pct: float | None = None
+    visceral_fat: float | None = None
+    basal_metabolic_rate_kcal: float | None = None
+    bone_mass_kg: float | None = None
+    notes: str | None = None
+
+
+class BodyMeasurementCreate(BaseModel):
+    user_id: str
+    date: str
+    waist_cm: float | None = None
+    chest_cm: float | None = None
+    arm_left_cm: float | None = None
+    arm_right_cm: float | None = None
+    thigh_left_cm: float | None = None
+    thigh_right_cm: float | None = None
+    hip_cm: float | None = None
+    neck_cm: float | None = None
+    notes: str | None = None
+
+
+class BodyMeasurementUpdate(BaseModel):
+    date: str
+    waist_cm: float | None = None
+    chest_cm: float | None = None
+    arm_left_cm: float | None = None
+    arm_right_cm: float | None = None
+    thigh_left_cm: float | None = None
+    thigh_right_cm: float | None = None
+    hip_cm: float | None = None
+    neck_cm: float | None = None
     notes: str | None = None
 
 
@@ -524,7 +614,11 @@ def validate_metric_date(date_value: str) -> str:
 
 
 @app.post("/api/body-metrics")
-def create_body_metric(metric: BodyMetricCreate):
+def create_body_metric(
+    metric: BodyMetricCreate,
+    current_user = Depends(get_authenticated_user),
+):
+    user_id = resolve_target_user(current_user, metric.user_id)
     date_value = validate_metric_date(metric.date)
 
     if metric.weight_kg <= 0:
@@ -541,7 +635,7 @@ def create_body_metric(metric: BodyMetricCreate):
         FROM users
         WHERE id = ?
         """,
-        (metric.user_id,),
+        (user_id,),
     ).fetchone()
 
     if not user:
@@ -558,10 +652,7 @@ def create_body_metric(metric: BodyMetricCreate):
         WHERE user_id = ?
           AND date = ?
         """,
-        (
-            metric.user_id,
-            date_value,
-        ),
+        (user_id, date_value),
     ).fetchone()
 
     if existing:
@@ -580,15 +671,27 @@ def create_body_metric(metric: BodyMetricCreate):
             user_id,
             date,
             weight_kg,
+            body_fat_pct,
+            muscle_mass_kg,
+            water_pct,
+            visceral_fat,
+            basal_metabolic_rate_kcal,
+            bone_mass_kg,
             notes
         )
-        VALUES (?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             metric_id,
-            metric.user_id,
+            user_id,
             date_value,
             metric.weight_kg,
+            metric.body_fat_pct,
+            metric.muscle_mass_kg,
+            metric.water_pct,
+            metric.visceral_fat,
+            metric.basal_metabolic_rate_kcal,
+            metric.bone_mass_kg,
             metric.notes,
         ),
     )
@@ -602,6 +705,12 @@ def create_body_metric(metric: BodyMetricCreate):
             user_id,
             date,
             weight_kg,
+            body_fat_pct,
+            muscle_mass_kg,
+            water_pct,
+            visceral_fat,
+            basal_metabolic_rate_kcal,
+            bone_mass_kg,
             notes
         FROM body_metrics
         WHERE id = ?
@@ -619,7 +728,10 @@ def list_body_metrics(
     user_id: str,
     date_from: str | None = None,
     date_to: str | None = None,
+    current_user = Depends(get_authenticated_user),
 ):
+    user_id = resolve_target_user(current_user, user_id)
+
     if date_from:
         date_from = validate_metric_date(date_from)
 
@@ -656,6 +768,12 @@ def list_body_metrics(
             user_id,
             date,
             weight_kg,
+            body_fat_pct,
+            muscle_mass_kg,
+            water_pct,
+            visceral_fat,
+            basal_metabolic_rate_kcal,
+            bone_mass_kg,
             notes
         FROM body_metrics
         WHERE user_id = ?
@@ -688,7 +806,9 @@ def update_body_metric(
     metric_id: str,
     metric: BodyMetricUpdate,
     user_id: str,
+    current_user = Depends(get_authenticated_user),
 ):
+    user_id = resolve_target_user(current_user, user_id)
     date_value = validate_metric_date(metric.date)
 
     if metric.weight_kg <= 0:
@@ -709,10 +829,7 @@ def update_body_metric(
         WHERE id = ?
           AND user_id = ?
         """,
-        (
-            metric_id,
-            user_id,
-        ),
+        (metric_id, user_id),
     ).fetchone()
 
     if not existing:
@@ -730,11 +847,7 @@ def update_body_metric(
           AND date = ?
           AND id != ?
         """,
-        (
-            user_id,
-            date_value,
-            metric_id,
-        ),
+        (user_id, date_value, metric_id),
     ).fetchone()
 
     if duplicate:
@@ -750,6 +863,12 @@ def update_body_metric(
         SET
             date = ?,
             weight_kg = ?,
+            body_fat_pct = ?,
+            muscle_mass_kg = ?,
+            water_pct = ?,
+            visceral_fat = ?,
+            basal_metabolic_rate_kcal = ?,
+            bone_mass_kg = ?,
             notes = ?
         WHERE id = ?
           AND user_id = ?
@@ -757,6 +876,12 @@ def update_body_metric(
         (
             date_value,
             metric.weight_kg,
+            metric.body_fat_pct,
+            metric.muscle_mass_kg,
+            metric.water_pct,
+            metric.visceral_fat,
+            metric.basal_metabolic_rate_kcal,
+            metric.bone_mass_kg,
             metric.notes,
             metric_id,
             user_id,
@@ -772,15 +897,18 @@ def update_body_metric(
             user_id,
             date,
             weight_kg,
+            body_fat_pct,
+            muscle_mass_kg,
+            water_pct,
+            visceral_fat,
+            basal_metabolic_rate_kcal,
+            bone_mass_kg,
             notes
         FROM body_metrics
         WHERE id = ?
           AND user_id = ?
         """,
-        (
-            metric_id,
-            user_id,
-        ),
+        (metric_id, user_id),
     ).fetchone()
 
     conn.close()
@@ -792,7 +920,9 @@ def update_body_metric(
 def delete_body_metric(
     metric_id: str,
     user_id: str,
+    current_user = Depends(get_authenticated_user),
 ):
+    user_id = resolve_target_user(current_user, user_id)
     conn = get_connection()
 
     existing = conn.execute(
@@ -806,10 +936,7 @@ def delete_body_metric(
         WHERE id = ?
           AND user_id = ?
         """,
-        (
-            metric_id,
-            user_id,
-        ),
+        (metric_id, user_id),
     ).fetchone()
 
     if not existing:
@@ -825,10 +952,7 @@ def delete_body_metric(
         WHERE id = ?
           AND user_id = ?
         """,
-        (
-            metric_id,
-            user_id,
-        ),
+        (metric_id, user_id),
     )
 
     conn.commit()
@@ -841,13 +965,733 @@ def delete_body_metric(
     }
 
 
+# ============================================================
+# BODY MEASUREMENTS
+# ============================================================
+
+@app.post("/api/body/measurements")
+def create_body_measurement(
+    measurement: BodyMeasurementCreate,
+    current_user = Depends(get_authenticated_user),
+):
+    user_id = resolve_target_user(current_user, measurement.user_id)
+    date_value = validate_metric_date(measurement.date)
+
+    conn = get_connection()
+
+    user = conn.execute(
+        """
+        SELECT id
+        FROM users
+        WHERE id = ?
+        """,
+        (user_id,),
+    ).fetchone()
+
+    if not user:
+        conn.close()
+        raise HTTPException(
+            status_code=404,
+            detail="Usuario no encontrado",
+        )
+
+    existing = conn.execute(
+        """
+        SELECT id
+        FROM body_measurements
+        WHERE user_id = ?
+          AND date = ?
+        """,
+        (user_id, date_value),
+    ).fetchone()
+
+    if existing:
+        conn.close()
+        raise HTTPException(
+            status_code=409,
+            detail="Ya existe una medición corporal para este usuario en esa fecha",
+        )
+
+    measurement_id = str(uuid.uuid4())
+
+    conn.execute(
+        """
+        INSERT INTO body_measurements (
+            id,
+            user_id,
+            date,
+            waist_cm,
+            chest_cm,
+            arm_left_cm,
+            arm_right_cm,
+            thigh_left_cm,
+            thigh_right_cm,
+            hip_cm,
+            neck_cm,
+            notes
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            measurement_id,
+            user_id,
+            date_value,
+            measurement.waist_cm,
+            measurement.chest_cm,
+            measurement.arm_left_cm,
+            measurement.arm_right_cm,
+            measurement.thigh_left_cm,
+            measurement.thigh_right_cm,
+            measurement.hip_cm,
+            measurement.neck_cm,
+            measurement.notes,
+        ),
+    )
+
+    conn.commit()
+
+    row = conn.execute(
+        """
+        SELECT
+            id,
+            user_id,
+            date,
+            waist_cm,
+            chest_cm,
+            arm_left_cm,
+            arm_right_cm,
+            thigh_left_cm,
+            thigh_right_cm,
+            hip_cm,
+            neck_cm,
+            notes,
+            created_at
+        FROM body_measurements
+        WHERE id = ?
+        """,
+        (measurement_id,),
+    ).fetchone()
+
+    conn.close()
+
+    return dict(row)
+
+
+@app.get("/api/body/measurements")
+def list_body_measurements(
+    user_id: str,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    current_user = Depends(get_authenticated_user),
+):
+    user_id = resolve_target_user(current_user, user_id)
+
+    if date_from:
+        date_from = validate_metric_date(date_from)
+
+    if date_to:
+        date_to = validate_metric_date(date_to)
+
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(
+            status_code=400,
+            detail="date_from no puede ser posterior a date_to",
+        )
+
+    conn = get_connection()
+
+    user = conn.execute(
+        """
+        SELECT id
+        FROM users
+        WHERE id = ?
+        """,
+        (user_id,),
+    ).fetchone()
+
+    if not user:
+        conn.close()
+        raise HTTPException(
+            status_code=404,
+            detail="Usuario no encontrado",
+        )
+
+    query = """
+        SELECT
+            id,
+            user_id,
+            date,
+            waist_cm,
+            chest_cm,
+            arm_left_cm,
+            arm_right_cm,
+            thigh_left_cm,
+            thigh_right_cm,
+            hip_cm,
+            neck_cm,
+            notes,
+            created_at
+        FROM body_measurements
+        WHERE user_id = ?
+    """
+
+    params = [user_id]
+
+    if date_from:
+        query += " AND date >= ?"
+        params.append(date_from)
+
+    if date_to:
+        query += " AND date <= ?"
+        params.append(date_to)
+
+    query += " ORDER BY date DESC"
+
+    rows = conn.execute(query, params).fetchall()
+
+    conn.close()
+
+    return {
+        "count": len(rows),
+        "measurements": [dict(row) for row in rows],
+    }
+
+
+@app.put("/api/body/measurements/{measurement_id}")
+def update_body_measurement(
+    measurement_id: str,
+    measurement: BodyMeasurementUpdate,
+    user_id: str,
+    current_user = Depends(get_authenticated_user),
+):
+    user_id = resolve_target_user(current_user, user_id)
+    date_value = validate_metric_date(measurement.date)
+
+    conn = get_connection()
+
+    existing = conn.execute(
+        """
+        SELECT id
+        FROM body_measurements
+        WHERE id = ?
+          AND user_id = ?
+        """,
+        (measurement_id, user_id),
+    ).fetchone()
+
+    if not existing:
+        conn.close()
+        raise HTTPException(
+            status_code=404,
+            detail="Medición corporal no encontrada para este usuario",
+        )
+
+    duplicate = conn.execute(
+        """
+        SELECT id
+        FROM body_measurements
+        WHERE user_id = ?
+          AND date = ?
+          AND id != ?
+        """,
+        (user_id, date_value, measurement_id),
+    ).fetchone()
+
+    if duplicate:
+        conn.close()
+        raise HTTPException(
+            status_code=409,
+            detail="Ya existe otra medición corporal para este usuario en esa fecha",
+        )
+
+    conn.execute(
+        """
+        UPDATE body_measurements
+        SET
+            date = ?,
+            waist_cm = ?,
+            chest_cm = ?,
+            arm_left_cm = ?,
+            arm_right_cm = ?,
+            thigh_left_cm = ?,
+            thigh_right_cm = ?,
+            hip_cm = ?,
+            neck_cm = ?,
+            notes = ?
+        WHERE id = ?
+          AND user_id = ?
+        """,
+        (
+            date_value,
+            measurement.waist_cm,
+            measurement.chest_cm,
+            measurement.arm_left_cm,
+            measurement.arm_right_cm,
+            measurement.thigh_left_cm,
+            measurement.thigh_right_cm,
+            measurement.hip_cm,
+            measurement.neck_cm,
+            measurement.notes,
+            measurement_id,
+            user_id,
+        ),
+    )
+
+    conn.commit()
+
+    row = conn.execute(
+        """
+        SELECT
+            id,
+            user_id,
+            date,
+            waist_cm,
+            chest_cm,
+            arm_left_cm,
+            arm_right_cm,
+            thigh_left_cm,
+            thigh_right_cm,
+            hip_cm,
+            neck_cm,
+            notes,
+            created_at
+        FROM body_measurements
+        WHERE id = ?
+          AND user_id = ?
+        """,
+        (measurement_id, user_id),
+    ).fetchone()
+
+    conn.close()
+
+    return dict(row)
+
+
+@app.delete("/api/body/measurements/{measurement_id}")
+def delete_body_measurement(
+    measurement_id: str,
+    user_id: str,
+    current_user = Depends(get_authenticated_user),
+):
+    user_id = resolve_target_user(current_user, user_id)
+    conn = get_connection()
+
+    existing = conn.execute(
+        """
+        SELECT id
+        FROM body_measurements
+        WHERE id = ?
+          AND user_id = ?
+        """,
+        (measurement_id, user_id),
+    ).fetchone()
+
+    if not existing:
+        conn.close()
+        raise HTTPException(
+            status_code=404,
+            detail="Medición corporal no encontrada para este usuario",
+        )
+
+    conn.execute(
+        """
+        DELETE FROM body_measurements
+        WHERE id = ?
+          AND user_id = ?
+        """,
+        (measurement_id, user_id),
+    )
+
+    conn.commit()
+    conn.close()
+
+    return {
+        "id": measurement_id,
+        "user_id": user_id,
+        "deleted": True,
+    }
+
+
+
+
+# ============================================================
+# BODY PHOTOS
+# ============================================================
+
+BODY_PHOTOS_DIR = (
+    Path(__file__).resolve().parent.parent
+    / "data"
+    / "uploads"
+    / "body_photos"
+)
+
+BODY_PHOTO_MAX_BYTES = 10 * 1024 * 1024
+
+BODY_PHOTO_ANGLES = {"front", "side", "back"}
+
+BODY_PHOTO_SIGNATURES = {
+    b"\xff\xd8\xff": ("image/jpeg", ".jpg"),
+    b"\x89PNG\r\n\x1a\n": ("image/png", ".png"),
+    b"RIFF": ("image/webp", ".webp"),
+}
+
+
+def validate_body_photo_angle(angle: str) -> str:
+    angle = angle.strip().lower()
+
+    if angle not in BODY_PHOTO_ANGLES:
+        raise HTTPException(
+            status_code=400,
+            detail="Ángulo no válido. Debe ser front, side o back.",
+        )
+
+    return angle
+
+
+def detect_body_photo_type(data: bytes) -> tuple[str, str]:
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg", ".jpg"
+
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png", ".png"
+
+    if (
+        len(data) >= 12
+        and data.startswith(b"RIFF")
+        and data[8:12] == b"WEBP"
+    ):
+        return "image/webp", ".webp"
+
+    raise HTTPException(
+        status_code=400,
+        detail="El archivo no es una imagen JPEG, PNG o WebP válida.",
+    )
+
+
+def validate_body_photo_data(data: bytes) -> tuple[str, str]:
+    if not data:
+        raise HTTPException(
+            status_code=400,
+            detail="La imagen está vacía.",
+        )
+
+    if len(data) > BODY_PHOTO_MAX_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail="La imagen supera el límite de 10 MB.",
+        )
+
+    return detect_body_photo_type(data)
+
+
+@app.post("/api/body/photos")
+async def upload_body_photo(
+    user_id: str = Query(...),
+    date: str = Query(...),
+    angle: str = Query(...),
+    file: UploadFile = File(...),
+    current_user = Depends(get_authenticated_user),
+):
+    user_id = resolve_target_user(current_user, user_id)
+    date_value = validate_metric_date(date)
+    angle = validate_body_photo_angle(angle)
+
+    conn = get_connection()
+
+    try:
+        user = conn.execute(
+            """
+            SELECT id
+            FROM users
+            WHERE id = ?
+            """,
+            (user_id,),
+        ).fetchone()
+
+        if not user:
+            raise HTTPException(
+                status_code=404,
+                detail="Usuario no encontrado",
+            )
+
+        existing = conn.execute(
+            """
+            SELECT id, file_path
+            FROM body_photos
+            WHERE user_id = ?
+              AND month_key = ?
+              AND angle = ?
+            """,
+            (user_id, date_value[:7], angle),
+        ).fetchone()
+
+        if existing:
+            raise HTTPException(
+                status_code=409,
+                detail="Ya existe una foto para ese usuario, mes y ángulo.",
+            )
+
+        data = await file.read()
+
+        content_type, extension = validate_body_photo_data(data)
+
+        photo_id = str(uuid.uuid4())
+        month_key = date_value[:7]
+
+        user_dir = BODY_PHOTOS_DIR / user_id / month_key
+        user_dir.mkdir(parents=True, exist_ok=True)
+
+        filename = f"{photo_id}{extension}"
+        absolute_path = user_dir / filename
+
+        relative_path = (
+            Path("body_photos")
+            / user_id
+            / month_key
+            / filename
+        )
+
+        absolute_path.write_bytes(data)
+
+        conn.execute(
+            """
+            INSERT INTO body_photos (
+                id,
+                user_id,
+                date,
+                month_key,
+                angle,
+                file_path
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                photo_id,
+                user_id,
+                date_value,
+                month_key,
+                angle,
+                str(relative_path),
+            ),
+        )
+
+        conn.commit()
+
+        return {
+            "id": photo_id,
+            "user_id": user_id,
+            "date": date_value,
+            "month_key": month_key,
+            "angle": angle,
+            "file_path": str(relative_path),
+            "content_type": content_type,
+            "original_filename": file.filename,
+        }
+
+    except HTTPException:
+        conn.close()
+        raise
+
+    except Exception:
+        conn.rollback()
+        conn.close()
+
+        if "absolute_path" in locals() and absolute_path.exists():
+            absolute_path.unlink()
+
+        raise
+
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+@app.get("/api/body/photos")
+def list_body_photos(
+    user_id: str,
+    month_key: str | None = None,
+    current_user = Depends(get_authenticated_user),
+):
+    user_id = resolve_target_user(current_user, user_id)
+
+    if month_key is not None:
+        if (
+            len(month_key) != 7
+            or month_key[4] != "-"
+            or not month_key[:4].isdigit()
+            or not month_key[5:].isdigit()
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="month_key debe tener formato YYYY-MM.",
+            )
+
+    conn = get_connection()
+
+    try:
+        query = """
+            SELECT
+                id,
+                user_id,
+                date,
+                month_key,
+                angle,
+                file_path,
+                created_at
+            FROM body_photos
+            WHERE user_id = ?
+        """
+
+        params = [user_id]
+
+        if month_key:
+            query += " AND month_key = ?"
+            params.append(month_key)
+
+        query += " ORDER BY date DESC, angle"
+
+        rows = conn.execute(query, params).fetchall()
+
+        return {
+            "photos": [dict(row) for row in rows]
+        }
+
+    finally:
+        conn.close()
+
+
+@app.get("/api/body/photos/{photo_id}/file")
+def get_body_photo_file(
+    photo_id: str,
+    current_user = Depends(get_authenticated_user),
+):
+    conn = get_connection()
+
+    try:
+        photo = conn.execute(
+            """
+            SELECT id, user_id, file_path, angle
+            FROM body_photos
+            WHERE id = ?
+            """,
+            (photo_id,),
+        ).fetchone()
+
+        if not photo:
+            raise HTTPException(
+                status_code=404,
+                detail="Foto no encontrada",
+            )
+
+        resolve_target_user(current_user, photo["user_id"])
+
+        relative_path = Path(photo["file_path"])
+
+        if (
+            relative_path.is_absolute()
+            or ".." in relative_path.parts
+            or not relative_path.parts
+            or relative_path.parts[0] != "body_photos"
+        ):
+            raise HTTPException(
+                status_code=500,
+                detail="Ruta de foto inválida.",
+            )
+
+        absolute_path = BODY_PHOTOS_DIR / Path(*relative_path.parts[1:])
+
+        if not absolute_path.is_file():
+            raise HTTPException(
+                status_code=404,
+                detail="Archivo de foto no encontrado",
+            )
+
+        media_type, _ = detect_body_photo_type(
+            absolute_path.read_bytes()[:16]
+        )
+
+        return FileResponse(
+            absolute_path,
+            media_type=media_type,
+        )
+
+    finally:
+        conn.close()
+
+
+@app.delete("/api/body/photos/{photo_id}")
+def delete_body_photo(
+    photo_id: str,
+    current_user = Depends(get_authenticated_user),
+):
+    conn = get_connection()
+
+    try:
+        photo = conn.execute(
+            """
+            SELECT id, user_id, file_path
+            FROM body_photos
+            WHERE id = ?
+            """,
+            (photo_id,),
+        ).fetchone()
+
+        if not photo:
+            raise HTTPException(
+                status_code=404,
+                detail="Foto no encontrada",
+            )
+
+        resolve_target_user(current_user, photo["user_id"])
+
+        relative_path = Path(photo["file_path"])
+
+        if (
+            relative_path.is_absolute()
+            or ".." in relative_path.parts
+            or not relative_path.parts
+            or relative_path.parts[0] != "body_photos"
+        ):
+            raise HTTPException(
+                status_code=500,
+                detail="Ruta de foto inválida.",
+            )
+
+        absolute_path = BODY_PHOTOS_DIR / Path(*relative_path.parts[1:])
+
+        conn.execute(
+            """
+            DELETE FROM body_photos
+            WHERE id = ?
+            """,
+            (photo_id,),
+        )
+
+        conn.commit()
+
+        if absolute_path.is_file():
+            absolute_path.unlink()
+
+        return {
+            "message": "Foto eliminada correctamente",
+            "id": photo_id,
+        }
+
+    finally:
+        conn.close()
+
 
 @app.get("/api/stats/summary")
 def get_stats_summary(
     user_id: str,
     date_from: str | None = None,
     date_to: str | None = None,
+    current_user = Depends(get_authenticated_user),
 ):
+    user_id = resolve_target_user(current_user, user_id)
+
     if date_from:
         try:
             datetime.strptime(date_from, "%Y-%m-%d")
@@ -1089,7 +1933,10 @@ def get_stats_prs(
     exercise_id: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
+    current_user = Depends(get_authenticated_user),
 ):
+    user_id = resolve_target_user(current_user, user_id)
+
     if date_from:
         try:
             datetime.strptime(date_from, "%Y-%m-%d")
@@ -1334,7 +2181,10 @@ def get_exercise_evolution(
     user_id: str,
     date_from: str | None = None,
     date_to: str | None = None,
+    current_user = Depends(get_authenticated_user),
 ):
+    user_id = resolve_target_user(current_user, user_id)
+
     if date_from:
         try:
             datetime.strptime(date_from, "%Y-%m-%d")
@@ -1550,6 +2400,7 @@ def list_exercises(
     category: str | None = None,
     equipment: str | None = None,
     include_inactive: bool = False,
+    current_user = Depends(get_authenticated_user),
 ):
     conn = get_connection()
 
@@ -1601,7 +2452,12 @@ def list_exercises(
     }
 
 @app.get("/api/exercises/{exercise_id}/last-performance")
-def get_last_performance(exercise_id: str, user_id: str):
+def get_last_performance(
+    exercise_id: str,
+    user_id: str,
+    current_user = Depends(get_authenticated_user),
+):
+    user_id = resolve_target_user(current_user, user_id)
     conn = get_connection()
 
     exercise = conn.execute(
@@ -1702,12 +2558,16 @@ class WorkoutUpdate(BaseModel):
 
 
 @app.post("/api/workouts")
-def create_workout(workout: WorkoutCreate):
+def create_workout(
+    workout: WorkoutCreate,
+    current_user = Depends(get_authenticated_user),
+):
+    user_id = resolve_target_user(current_user, workout.user_id)
     conn = get_connection()
 
     user = conn.execute(
         "SELECT id FROM users WHERE id = ?",
-        (workout.user_id,),
+        (user_id,),
     ).fetchone()
 
     if user is None:
@@ -1726,7 +2586,7 @@ def create_workout(workout: WorkoutCreate):
               AND user_id = ?
               AND is_active = 1
             """,
-            (workout.routine_id, workout.user_id),
+            (workout.routine_id, user_id),
         ).fetchone()
 
         if routine is None:
@@ -1753,7 +2613,7 @@ def create_workout(workout: WorkoutCreate):
         """,
         (
             workout_id,
-            workout.user_id,
+            user_id,
             workout.routine_id,
             now,
             workout.notes,
@@ -1765,7 +2625,7 @@ def create_workout(workout: WorkoutCreate):
 
     return {
         "id": workout_id,
-        "user_id": workout.user_id,
+        "user_id": user_id,
         "routine_id": workout.routine_id,
         "date": now,
         "status": "in_progress",
@@ -1784,7 +2644,9 @@ def substitute_workout_exercise(
     workout_id: str,
     data: WorkoutExerciseSubstitutionCreate,
     user_id: str,
+    current_user = Depends(get_authenticated_user),
 ):
+    user_id = resolve_target_user(current_user, user_id)
     conn = get_connection()
 
     # -----------------------------------------------------
@@ -2029,7 +2891,9 @@ def add_workout_set(
     workout_id: str,
     workout_set: WorkoutSetCreate,
     user_id: str,
+    current_user = Depends(get_authenticated_user),
 ):
+    user_id = resolve_target_user(current_user, user_id)
     conn = get_connection()
 
     # -----------------------------------------------------
@@ -2304,7 +3168,9 @@ def update_workout_set(
     set_id: str,
     workout_set: WorkoutSetUpdate,
     user_id: str,
+    current_user = Depends(get_authenticated_user),
 ):
+    user_id = resolve_target_user(current_user, user_id)
     conn = get_connection()
 
     # -----------------------------------------------------
@@ -2485,7 +3351,9 @@ def delete_workout_set(
     workout_id: str,
     set_id: str,
     user_id: str,
+    current_user = Depends(get_authenticated_user),
 ):
+    user_id = resolve_target_user(current_user, user_id)
     conn = get_connection()
 
     # -----------------------------------------------------
@@ -2568,7 +3436,12 @@ def delete_workout_set(
 
 
 @app.get("/api/routines/{routine_id}/recommendations")
-def get_routine_recommendations(routine_id: str, user_id: str):
+def get_routine_recommendations(
+    routine_id: str,
+    user_id: str,
+    current_user = Depends(get_authenticated_user),
+):
+    user_id = resolve_target_user(current_user, user_id)
     conn = get_connection()
 
     routine = conn.execute(
@@ -2866,7 +3739,12 @@ def get_routine_recommendations(routine_id: str, user_id: str):
 
 
 @app.get("/api/exercises/{exercise_id}/substitutions")
-def get_exercise_substitutions(exercise_id: str, user_id: str):
+def get_exercise_substitutions(
+    exercise_id: str,
+    user_id: str,
+    current_user = Depends(get_authenticated_user),
+):
+    user_id = resolve_target_user(current_user, user_id)
     conn = get_connection()
 
     exercise = conn.execute("""
@@ -2943,7 +3821,12 @@ def get_exercise_substitutions(exercise_id: str, user_id: str):
     }
 
 @app.get("/api/workouts/{workout_id}")
-def get_workout(workout_id: str, user_id: str):
+def get_workout(
+    workout_id: str,
+    user_id: str,
+    current_user = Depends(get_authenticated_user),
+):
+    user_id = resolve_target_user(current_user, user_id)
     conn = get_connection()
 
     workout = conn.execute(
@@ -3015,7 +3898,10 @@ def update_workout(
     workout_id: str,
     workout: WorkoutUpdate,
     user_id: str,
+    current_user = Depends(get_authenticated_user),
 ):
+    user_id = resolve_target_user(current_user, user_id)
+
     if workout.status not in {
         "in_progress",
         "completed",

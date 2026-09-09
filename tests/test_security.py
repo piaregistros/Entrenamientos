@@ -1037,3 +1037,735 @@ def test_body_photo_delete_removes_record_and_file(client_pablo):
     assert response.status_code == 200
     assert response.json()["photos"] == []
 
+
+# =========================================================
+# USER GOALS
+# =========================================================
+
+def test_pablo_can_create_and_read_own_goal(client_pablo):
+    response = client_pablo.post(
+        "/api/body/goals",
+        json={
+            "user_id": PABLO_ID,
+            "goal_type": "muscle_gain",
+            "title": "Ganar masa muscular",
+            "description": "Aumentar masa muscular manteniendo una progresión sostenida.",
+            "start_date": "2026-09-09",
+            "target_date": "2027-03-09",
+            "is_active": True,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+
+    data = response.json()
+
+    assert data["user_id"] == PABLO_ID
+    assert data["goal_type"] == "muscle_gain"
+    assert data["title"] == "Ganar masa muscular"
+    assert data["is_active"] in (1, True)
+    assert data["id"]
+
+    response = client_pablo.get(
+        "/api/body/goals",
+        params={"user_id": PABLO_ID},
+    )
+
+    assert response.status_code == 200
+    goals = response.json()["goals"]
+
+    assert len(goals) == 1
+    assert goals[0]["id"] == data["id"]
+
+
+def test_estefi_can_create_own_goal(client_estefi):
+    response = client_estefi.post(
+        "/api/body/goals",
+        json={
+            "user_id": ESTEFI_ID,
+            "goal_type": "strength",
+            "title": "Mejorar fuerza",
+            "description": None,
+            "start_date": "2026-09-09",
+            "target_date": None,
+            "is_active": True,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["user_id"] == ESTEFI_ID
+
+
+def test_pablo_admin_can_create_and_read_estefi_goal(client_pablo):
+    response = client_pablo.post(
+        "/api/body/goals",
+        json={
+            "user_id": ESTEFI_ID,
+            "goal_type": "fat_loss",
+            "title": "Reducir porcentaje graso",
+            "description": "Objetivo de composición corporal.",
+            "start_date": "2026-09-09",
+            "target_date": "2027-01-09",
+            "is_active": True,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+
+    response = client_pablo.get(
+        "/api/body/goals",
+        params={"user_id": ESTEFI_ID},
+    )
+
+    assert response.status_code == 200
+    assert len(response.json()["goals"]) == 1
+    assert response.json()["goals"][0]["user_id"] == ESTEFI_ID
+
+
+def test_estefi_cannot_access_pablo_goals(client_pablo, client_estefi):
+    response = client_pablo.post(
+        "/api/body/goals",
+        json={
+            "user_id": PABLO_ID,
+            "goal_type": "strength",
+            "title": "Objetivo privado de Pablo",
+            "start_date": "2026-09-09",
+            "target_date": None,
+            "is_active": True,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+
+    response = client_estefi.get(
+        "/api/body/goals",
+        params={"user_id": PABLO_ID},
+    )
+
+    assert response.status_code == 403
+
+
+def test_estefi_cannot_create_goal_for_pablo(client_estefi):
+    response = client_estefi.post(
+        "/api/body/goals",
+        json={
+            "user_id": PABLO_ID,
+            "goal_type": "strength",
+            "title": "Intento de suplantación",
+            "start_date": "2026-09-09",
+            "target_date": None,
+            "is_active": True,
+        },
+    )
+
+    assert response.status_code == 403
+
+
+def test_goal_update_and_delete(client_pablo):
+    response = client_pablo.post(
+        "/api/body/goals",
+        json={
+            "user_id": PABLO_ID,
+            "goal_type": "maintenance",
+            "title": "Mantener composición",
+            "description": "Objetivo inicial.",
+            "start_date": "2026-09-09",
+            "target_date": "2027-01-01",
+            "is_active": True,
+        },
+    )
+
+    assert response.status_code == 200
+    goal_id = response.json()["id"]
+
+    response = client_pablo.put(
+        f"/api/body/goals/{goal_id}",
+        params={"user_id": PABLO_ID},
+        json={
+            "goal_type": "muscle_gain",
+            "title": "Nuevo objetivo",
+            "description": "Objetivo actualizado.",
+            "start_date": "2026-09-10",
+            "target_date": "2027-03-10",
+            "is_active": True,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    data = response.json()
+
+    assert data["id"] == goal_id
+    assert data["goal_type"] == "muscle_gain"
+    assert data["title"] == "Nuevo objetivo"
+    assert data["description"] == "Objetivo actualizado."
+
+    response = client_pablo.delete(
+        f"/api/body/goals/{goal_id}",
+        params={"user_id": PABLO_ID},
+    )
+
+    assert response.status_code == 200
+
+    response = client_pablo.get(
+        "/api/body/goals",
+        params={"user_id": PABLO_ID},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["goals"] == []
+
+
+def test_goals_preserve_history(client_pablo):
+    for title, is_active in [
+        ("Objetivo anterior", False),
+        ("Objetivo actual", True),
+    ]:
+        response = client_pablo.post(
+            "/api/body/goals",
+            json={
+                "user_id": PABLO_ID,
+                "goal_type": "other",
+                "title": title,
+                "description": None,
+                "start_date": "2026-09-09",
+                "target_date": None,
+                "is_active": is_active,
+            },
+        )
+
+        assert response.status_code == 200, response.text
+
+    response = client_pablo.get(
+        "/api/body/goals",
+        params={"user_id": PABLO_ID},
+    )
+
+    assert response.status_code == 200
+
+    goals = response.json()["goals"]
+
+    assert len(goals) == 2
+    assert {goal["title"] for goal in goals} == {
+        "Objetivo anterior",
+        "Objetivo actual",
+    }
+
+
+@pytest.mark.parametrize(
+    "goal_type",
+    ["invalid", "", "MUSCLE_GAIN"],
+)
+def test_invalid_goal_type_is_rejected(client_pablo, goal_type):
+    response = client_pablo.post(
+        "/api/body/goals",
+        json={
+            "user_id": PABLO_ID,
+            "goal_type": goal_type,
+            "title": "Objetivo inválido",
+            "start_date": "2026-09-09",
+            "target_date": None,
+            "is_active": True,
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_goal_title_is_required(client_pablo):
+    response = client_pablo.post(
+        "/api/body/goals",
+        json={
+            "user_id": PABLO_ID,
+            "goal_type": "strength",
+            "start_date": "2026-09-09",
+            "target_date": None,
+            "is_active": True,
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_goal_invalid_date_is_rejected(client_pablo):
+    response = client_pablo.post(
+        "/api/body/goals",
+        json={
+            "user_id": PABLO_ID,
+            "goal_type": "strength",
+            "title": "Objetivo con fecha inválida",
+            "start_date": "09/09/2026",
+            "target_date": None,
+            "is_active": True,
+        },
+    )
+
+    assert response.status_code == 400
+
+
+def test_goal_target_date_cannot_precede_start_date(client_pablo):
+    response = client_pablo.post(
+        "/api/body/goals",
+        json={
+            "user_id": PABLO_ID,
+            "goal_type": "strength",
+            "title": "Objetivo con fechas incompatibles",
+            "start_date": "2027-01-01",
+            "target_date": "2026-09-09",
+            "is_active": True,
+        },
+    )
+
+    assert response.status_code == 400
+
+
+def test_authenticated_goal_write_requires_csrf(client_pablo):
+    client_pablo.headers.pop("X-CSRF-Token", None)
+
+    response = client_pablo.post(
+        "/api/body/goals",
+        json={
+            "user_id": PABLO_ID,
+            "goal_type": "strength",
+            "title": "Sin CSRF",
+            "start_date": "2026-09-09",
+            "target_date": None,
+            "is_active": True,
+        },
+    )
+
+    assert response.status_code == 403
+
+
+def test_unauthenticated_goal_access_is_rejected(test_db):
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/body/goals",
+            params={"user_id": PABLO_ID},
+        )
+
+    assert response.status_code == 401
+
+
+# =========================================================
+# PROGRESS NOTES
+# =========================================================
+
+def test_pablo_can_create_and_read_own_progress_note(client_pablo):
+    response = client_pablo.post(
+        "/api/progress-notes",
+        json={
+            "user_id": PABLO_ID,
+            "workout_log_id": None,
+            "date": "2026-09-09",
+            "energy": 4,
+            "satisfaction": 5,
+            "effort": 3,
+            "motivation": 4,
+            "recovery": 4,
+            "soreness": 2,
+            "notes": "Me encontré bastante bien durante la sesión.",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+
+    data = response.json()
+
+    assert data["user_id"] == PABLO_ID
+    assert data["date"] == "2026-09-09"
+    assert data["energy"] == 4
+    assert data["satisfaction"] == 5
+    assert data["effort"] == 3
+    assert data["motivation"] == 4
+    assert data["recovery"] == 4
+    assert data["soreness"] == 2
+    assert data["notes"] == "Me encontré bastante bien durante la sesión."
+    assert data["id"]
+
+    response = client_pablo.get(
+        "/api/progress-notes",
+        params={"user_id": PABLO_ID},
+    )
+
+    assert response.status_code == 200
+    notes = response.json()["notes"]
+
+    assert len(notes) == 1
+    assert notes[0]["id"] == data["id"]
+
+
+def test_estefi_can_create_own_progress_note(client_estefi):
+    response = client_estefi.post(
+        "/api/progress-notes",
+        json={
+            "user_id": ESTEFI_ID,
+            "workout_log_id": None,
+            "date": "2026-09-09",
+            "energy": 3,
+            "satisfaction": 4,
+            "effort": 4,
+            "motivation": 3,
+            "recovery": 3,
+            "soreness": 2,
+            "notes": "Sesión correcta.",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["user_id"] == ESTEFI_ID
+
+
+def test_pablo_admin_can_create_and_read_estefi_progress_note(client_pablo):
+    response = client_pablo.post(
+        "/api/progress-notes",
+        json={
+            "user_id": ESTEFI_ID,
+            "workout_log_id": None,
+            "date": "2026-09-09",
+            "energy": 5,
+            "satisfaction": 5,
+            "effort": 2,
+            "motivation": 5,
+            "recovery": 4,
+            "soreness": 1,
+            "notes": "Muy buena sesión.",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+
+    response = client_pablo.get(
+        "/api/progress-notes",
+        params={"user_id": ESTEFI_ID},
+    )
+
+    assert response.status_code == 200
+    notes = response.json()["notes"]
+
+    assert len(notes) == 1
+    assert notes[0]["user_id"] == ESTEFI_ID
+
+
+def test_estefi_cannot_access_pablo_progress_notes(client_pablo, client_estefi):
+    response = client_pablo.post(
+        "/api/progress-notes",
+        json={
+            "user_id": PABLO_ID,
+            "workout_log_id": None,
+            "date": "2026-09-09",
+            "energy": 4,
+            "satisfaction": 4,
+            "effort": 3,
+            "motivation": 4,
+            "recovery": 4,
+            "soreness": 2,
+            "notes": "Privado.",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+
+    response = client_estefi.get(
+        "/api/progress-notes",
+        params={"user_id": PABLO_ID},
+    )
+
+    assert response.status_code == 403
+
+
+def test_estefi_cannot_create_progress_note_for_pablo(client_estefi):
+    response = client_estefi.post(
+        "/api/progress-notes",
+        json={
+            "user_id": PABLO_ID,
+            "workout_log_id": None,
+            "date": "2026-09-09",
+            "energy": 4,
+            "satisfaction": 4,
+            "effort": 3,
+            "motivation": 4,
+            "recovery": 4,
+            "soreness": 2,
+            "notes": "Intento no autorizado.",
+        },
+    )
+
+    assert response.status_code == 403
+
+
+def test_progress_note_update_and_delete(client_pablo):
+    response = client_pablo.post(
+        "/api/progress-notes",
+        json={
+            "user_id": PABLO_ID,
+            "workout_log_id": None,
+            "date": "2026-09-09",
+            "energy": 3,
+            "satisfaction": 3,
+            "effort": 4,
+            "motivation": 3,
+            "recovery": 3,
+            "soreness": 4,
+            "notes": "Sesión exigente.",
+        },
+    )
+
+    assert response.status_code == 200
+    note_id = response.json()["id"]
+
+    response = client_pablo.put(
+        f"/api/progress-notes/{note_id}",
+        params={"user_id": PABLO_ID},
+        json={
+            "date": "2026-09-10",
+            "energy": 5,
+            "satisfaction": 5,
+            "effort": 2,
+            "motivation": 5,
+            "recovery": 5,
+            "soreness": 1,
+            "notes": "Recuperación excelente.",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+
+    data = response.json()
+
+    assert data["id"] == note_id
+    assert data["date"] == "2026-09-10"
+    assert data["energy"] == 5
+    assert data["satisfaction"] == 5
+    assert data["effort"] == 2
+    assert data["motivation"] == 5
+    assert data["recovery"] == 5
+    assert data["soreness"] == 1
+    assert data["notes"] == "Recuperación excelente."
+
+    response = client_pablo.delete(
+        f"/api/progress-notes/{note_id}",
+        params={"user_id": PABLO_ID},
+    )
+
+    assert response.status_code == 200
+
+    response = client_pablo.get(
+        "/api/progress-notes",
+        params={"user_id": PABLO_ID},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["notes"] == []
+
+
+def test_only_one_progress_note_per_workout(client_pablo):
+    workout_id = "677cd2fc-bf08-40f7-b890-4398b229abbc"
+
+    response = client_pablo.post(
+        "/api/progress-notes",
+        json={
+            "user_id": PABLO_ID,
+            "workout_log_id": workout_id,
+            "date": "2026-09-03",
+            "energy": 4,
+            "satisfaction": 4,
+            "effort": 3,
+            "motivation": 4,
+            "recovery": 4,
+            "soreness": 2,
+            "notes": "Primera valoración.",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+
+    response = client_pablo.post(
+        "/api/progress-notes",
+        json={
+            "user_id": PABLO_ID,
+            "workout_log_id": workout_id,
+            "date": "2026-09-03",
+            "energy": 5,
+            "satisfaction": 5,
+            "effort": 2,
+            "motivation": 5,
+            "recovery": 5,
+            "soreness": 1,
+            "notes": "Segunda valoración.",
+        },
+    )
+
+    assert response.status_code in (400, 409)
+
+
+def test_progress_note_without_workout_is_allowed(client_pablo):
+    response = client_pablo.post(
+        "/api/progress-notes",
+        json={
+            "user_id": PABLO_ID,
+            "workout_log_id": None,
+            "date": "2026-09-11",
+            "energy": 4,
+            "satisfaction": None,
+            "effort": None,
+            "motivation": 4,
+            "recovery": None,
+            "soreness": None,
+            "notes": "Día sin entrenamiento.",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["workout_log_id"] is None
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "energy",
+        "satisfaction",
+        "effort",
+        "motivation",
+        "recovery",
+        "soreness",
+    ],
+)
+def test_progress_note_rating_below_one_is_rejected(client_pablo, field):
+    payload = {
+        "user_id": PABLO_ID,
+        "workout_log_id": None,
+        "date": "2026-09-12",
+        "energy": 4,
+        "satisfaction": 4,
+        "effort": 4,
+        "motivation": 4,
+        "recovery": 4,
+        "soreness": 4,
+        "notes": None,
+    }
+
+    payload[field] = 0
+
+    response = client_pablo.post(
+        "/api/progress-notes",
+        json=payload,
+    )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "energy",
+        "satisfaction",
+        "effort",
+        "motivation",
+        "recovery",
+        "soreness",
+    ],
+)
+def test_progress_note_rating_above_five_is_rejected(client_pablo, field):
+    payload = {
+        "user_id": PABLO_ID,
+        "workout_log_id": None,
+        "date": "2026-09-13",
+        "energy": 4,
+        "satisfaction": 4,
+        "effort": 4,
+        "motivation": 4,
+        "recovery": 4,
+        "soreness": 4,
+        "notes": None,
+    }
+
+    payload[field] = 6
+
+    response = client_pablo.post(
+        "/api/progress-notes",
+        json=payload,
+    )
+
+    assert response.status_code == 422
+
+
+def test_progress_note_invalid_date_is_rejected(client_pablo):
+    response = client_pablo.post(
+        "/api/progress-notes",
+        json={
+            "user_id": PABLO_ID,
+            "workout_log_id": None,
+            "date": "13/09/2026",
+            "energy": 4,
+            "satisfaction": 4,
+            "effort": 3,
+            "motivation": 4,
+            "recovery": 4,
+            "soreness": 2,
+            "notes": None,
+        },
+    )
+
+    assert response.status_code == 400
+
+
+def test_progress_note_cannot_reference_another_users_workout(
+    client_pablo,
+    client_estefi,
+):
+    response = client_estefi.post(
+        "/api/progress-notes",
+        json={
+            "user_id": ESTEFI_ID,
+            "workout_log_id": "677cd2fc-bf08-40f7-b890-4398b229abbc",
+            "date": "2026-09-14",
+            "energy": 4,
+            "satisfaction": 4,
+            "effort": 3,
+            "motivation": 4,
+            "recovery": 4,
+            "soreness": 2,
+            "notes": "No debería poder asociarlo.",
+        },
+    )
+
+    assert response.status_code in (403, 404)
+
+
+def test_authenticated_progress_note_write_requires_csrf(client_pablo):
+    client_pablo.headers.pop("X-CSRF-Token", None)
+
+    response = client_pablo.post(
+        "/api/progress-notes",
+        json={
+            "user_id": PABLO_ID,
+            "workout_log_id": None,
+            "date": "2026-09-15",
+            "energy": 4,
+            "satisfaction": 4,
+            "effort": 3,
+            "motivation": 4,
+            "recovery": 4,
+            "soreness": 2,
+            "notes": None,
+        },
+    )
+
+    assert response.status_code == 403
+
+
+def test_unauthenticated_progress_notes_access_is_rejected(test_db):
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/progress-notes",
+            params={"user_id": PABLO_ID},
+        )
+
+    assert response.status_code == 401
+

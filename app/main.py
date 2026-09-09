@@ -613,6 +613,51 @@ def validate_metric_date(date_value: str) -> str:
         )
 
 
+
+class UserGoalCreate(BaseModel):
+    user_id: str
+    goal_type: str
+    title: str
+    description: str | None = None
+    start_date: str
+    target_date: str | None = None
+    is_active: bool = True
+
+
+class UserGoalUpdate(BaseModel):
+    goal_type: str
+    title: str
+    description: str | None = None
+    start_date: str
+    target_date: str | None = None
+    is_active: bool = True
+
+
+
+class ProgressNoteCreate(BaseModel):
+    user_id: str
+    workout_log_id: str | None = None
+    date: str
+    energy: int | None = None
+    satisfaction: int | None = None
+    effort: int | None = None
+    motivation: int | None = None
+    recovery: int | None = None
+    soreness: int | None = None
+    notes: str | None = None
+
+
+class ProgressNoteUpdate(BaseModel):
+    date: str
+    energy: int | None = None
+    satisfaction: int | None = None
+    effort: int | None = None
+    motivation: int | None = None
+    recovery: int | None = None
+    soreness: int | None = None
+    notes: str | None = None
+
+
 @app.post("/api/body-metrics")
 def create_body_metric(
     metric: BodyMetricCreate,
@@ -968,6 +1013,671 @@ def delete_body_metric(
 # ============================================================
 # BODY MEASUREMENTS
 # ============================================================
+
+
+# =========================================================
+# USER GOALS
+# =========================================================
+
+VALID_GOAL_TYPES = {
+    "muscle_gain",
+    "strength",
+    "fat_loss",
+    "maintenance",
+    "other",
+}
+
+
+def validate_goal_dates(start_date: str, target_date: str | None):
+    from datetime import date
+
+    try:
+        start = date.fromisoformat(start_date)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="start_date must be a valid ISO date (YYYY-MM-DD)",
+        )
+
+    if target_date is None:
+        return
+
+    try:
+        target = date.fromisoformat(target_date)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="target_date must be a valid ISO date (YYYY-MM-DD)",
+        )
+
+    if target < start:
+        raise HTTPException(
+            status_code=400,
+            detail="target_date cannot be earlier than start_date",
+        )
+
+
+@app.post("/api/body/goals")
+def create_user_goal(
+    goal: UserGoalCreate,
+    current_user=Depends(get_authenticated_user),
+):
+    target_user_id = resolve_target_user(current_user, goal.user_id)
+
+    if goal.goal_type not in VALID_GOAL_TYPES:
+        raise HTTPException(
+            status_code=422,
+            detail="Invalid goal_type",
+        )
+
+    if not goal.title.strip():
+        raise HTTPException(
+            status_code=422,
+            detail="title is required",
+        )
+
+    validate_goal_dates(goal.start_date, goal.target_date)
+
+    goal_id = str(uuid.uuid4())
+    conn = get_connection()
+
+    try:
+        conn.execute(
+            """
+            INSERT INTO user_goals (
+                id,
+                user_id,
+                goal_type,
+                title,
+                description,
+                start_date,
+                target_date,
+                is_active
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                goal_id,
+                target_user_id,
+                goal.goal_type,
+                goal.title.strip(),
+                goal.description,
+                goal.start_date,
+                goal.target_date,
+                1 if goal.is_active else 0,
+            ),
+        )
+
+        conn.commit()
+
+        row = conn.execute(
+            """
+            SELECT
+                id,
+                user_id,
+                goal_type,
+                title,
+                description,
+                start_date,
+                target_date,
+                is_active,
+                created_at,
+                updated_at
+            FROM user_goals
+            WHERE id = ?
+            """,
+            (goal_id,),
+        ).fetchone()
+
+        return dict(row)
+
+    finally:
+        conn.close()
+
+
+@app.get("/api/body/goals")
+def get_user_goals(
+    user_id: str,
+    is_active: bool | None = Query(default=None),
+    current_user=Depends(get_authenticated_user),
+):
+    target_user_id = resolve_target_user(current_user, user_id)
+
+    conn = get_connection()
+
+    try:
+        if is_active is None:
+            rows = conn.execute(
+                """
+                SELECT
+                    id,
+                    user_id,
+                    goal_type,
+                    title,
+                    description,
+                    start_date,
+                    target_date,
+                    is_active,
+                    created_at,
+                    updated_at
+                FROM user_goals
+                WHERE user_id = ?
+                ORDER BY start_date DESC, created_at DESC
+                """,
+                (target_user_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT
+                    id,
+                    user_id,
+                    goal_type,
+                    title,
+                    description,
+                    start_date,
+                    target_date,
+                    is_active,
+                    created_at,
+                    updated_at
+                FROM user_goals
+                WHERE user_id = ?
+                  AND is_active = ?
+                ORDER BY start_date DESC, created_at DESC
+                """,
+                (target_user_id, 1 if is_active else 0),
+            ).fetchall()
+
+        return {
+            "count": len(rows),
+            "goals": [dict(row) for row in rows],
+        }
+
+    finally:
+        conn.close()
+
+
+@app.put("/api/body/goals/{goal_id}")
+def update_user_goal(
+    goal_id: str,
+    goal: UserGoalUpdate,
+    user_id: str,
+    current_user=Depends(get_authenticated_user),
+):
+    target_user_id = resolve_target_user(current_user, user_id)
+
+    if goal.goal_type not in VALID_GOAL_TYPES:
+        raise HTTPException(
+            status_code=422,
+            detail="Invalid goal_type",
+        )
+
+    if not goal.title.strip():
+        raise HTTPException(
+            status_code=422,
+            detail="title is required",
+        )
+
+    validate_goal_dates(goal.start_date, goal.target_date)
+
+    conn = get_connection()
+
+    try:
+        existing = conn.execute(
+            """
+            SELECT id
+            FROM user_goals
+            WHERE id = ?
+              AND user_id = ?
+            """,
+            (goal_id, target_user_id),
+        ).fetchone()
+
+        if existing is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Goal not found",
+            )
+
+        conn.execute(
+            """
+            UPDATE user_goals
+            SET
+                goal_type = ?,
+                title = ?,
+                description = ?,
+                start_date = ?,
+                target_date = ?,
+                is_active = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+              AND user_id = ?
+            """,
+            (
+                goal.goal_type,
+                goal.title.strip(),
+                goal.description,
+                goal.start_date,
+                goal.target_date,
+                1 if goal.is_active else 0,
+                goal_id,
+                target_user_id,
+            ),
+        )
+
+        conn.commit()
+
+        row = conn.execute(
+            """
+            SELECT
+                id,
+                user_id,
+                goal_type,
+                title,
+                description,
+                start_date,
+                target_date,
+                is_active,
+                created_at,
+                updated_at
+            FROM user_goals
+            WHERE id = ?
+            """,
+            (goal_id,),
+        ).fetchone()
+
+        return dict(row)
+
+    finally:
+        conn.close()
+
+
+@app.delete("/api/body/goals/{goal_id}")
+def delete_user_goal(
+    goal_id: str,
+    user_id: str,
+    current_user=Depends(get_authenticated_user),
+):
+    target_user_id = resolve_target_user(current_user, user_id)
+
+    conn = get_connection()
+
+    try:
+        existing = conn.execute(
+            """
+            SELECT id
+            FROM user_goals
+            WHERE id = ?
+              AND user_id = ?
+            """,
+            (goal_id, target_user_id),
+        ).fetchone()
+
+        if existing is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Goal not found",
+            )
+
+        conn.execute(
+            """
+            DELETE FROM user_goals
+            WHERE id = ?
+              AND user_id = ?
+            """,
+            (goal_id, target_user_id),
+        )
+
+        conn.commit()
+
+        return {
+            "message": "Goal deleted successfully",
+            "id": goal_id,
+        }
+
+    finally:
+        conn.close()
+
+
+
+
+# =========================================================
+# PROGRESS NOTES
+# =========================================================
+
+PROGRESS_NOTE_RATING_FIELDS = (
+    "energy",
+    "satisfaction",
+    "effort",
+    "motivation",
+    "recovery",
+    "soreness",
+)
+
+
+def validate_progress_note_date(value: str):
+    from datetime import date
+
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="date must be a valid ISO date (YYYY-MM-DD)",
+        )
+
+
+def validate_progress_note_ratings(note):
+    for field in PROGRESS_NOTE_RATING_FIELDS:
+        value = getattr(note, field)
+
+        if value is not None and not 1 <= value <= 5:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{field} must be between 1 and 5",
+            )
+
+
+def validate_progress_note_workout(
+    conn,
+    workout_log_id: str | None,
+    user_id: str,
+):
+    if workout_log_id is None:
+        return
+
+    row = conn.execute(
+        """
+        SELECT id
+        FROM workout_logs
+        WHERE id = ?
+          AND user_id = ?
+        """,
+        (workout_log_id, user_id),
+    ).fetchone()
+
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Workout log not found",
+        )
+
+
+@app.post("/api/progress-notes")
+def create_progress_note(
+    note: ProgressNoteCreate,
+    current_user=Depends(get_authenticated_user),
+):
+    target_user_id = resolve_target_user(current_user, note.user_id)
+
+    validate_progress_note_date(note.date)
+    validate_progress_note_ratings(note)
+
+    note_id = str(uuid.uuid4())
+    conn = get_connection()
+
+    try:
+        validate_progress_note_workout(
+            conn,
+            note.workout_log_id,
+            target_user_id,
+        )
+
+        if note.workout_log_id is not None:
+            existing = conn.execute(
+                """
+                SELECT id
+                FROM progress_notes
+                WHERE user_id = ?
+                  AND workout_log_id = ?
+                """,
+                (target_user_id, note.workout_log_id),
+            ).fetchone()
+
+            if existing is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="A progress note already exists for this workout",
+                )
+
+        conn.execute(
+            """
+            INSERT INTO progress_notes (
+                id,
+                user_id,
+                workout_log_id,
+                date,
+                energy,
+                satisfaction,
+                effort,
+                motivation,
+                recovery,
+                soreness,
+                notes
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                note_id,
+                target_user_id,
+                note.workout_log_id,
+                note.date,
+                note.energy,
+                note.satisfaction,
+                note.effort,
+                note.motivation,
+                note.recovery,
+                note.soreness,
+                note.notes,
+            ),
+        )
+
+        conn.commit()
+
+        row = conn.execute(
+            """
+            SELECT
+                id,
+                user_id,
+                workout_log_id,
+                date,
+                energy,
+                satisfaction,
+                effort,
+                motivation,
+                recovery,
+                soreness,
+                notes,
+                created_at
+            FROM progress_notes
+            WHERE id = ?
+            """,
+            (note_id,),
+        ).fetchone()
+
+        return dict(row)
+
+    finally:
+        conn.close()
+
+
+@app.get("/api/progress-notes")
+def get_progress_notes(
+    user_id: str,
+    current_user=Depends(get_authenticated_user),
+):
+    target_user_id = resolve_target_user(current_user, user_id)
+
+    conn = get_connection()
+
+    try:
+        rows = conn.execute(
+            """
+            SELECT
+                id,
+                user_id,
+                workout_log_id,
+                date,
+                energy,
+                satisfaction,
+                effort,
+                motivation,
+                recovery,
+                soreness,
+                notes,
+                created_at
+            FROM progress_notes
+            WHERE user_id = ?
+            ORDER BY date DESC, created_at DESC
+            """,
+            (target_user_id,),
+        ).fetchall()
+
+        return {
+            "count": len(rows),
+            "notes": [dict(row) for row in rows],
+        }
+
+    finally:
+        conn.close()
+
+
+@app.put("/api/progress-notes/{note_id}")
+def update_progress_note(
+    note_id: str,
+    note: ProgressNoteUpdate,
+    user_id: str,
+    current_user=Depends(get_authenticated_user),
+):
+    target_user_id = resolve_target_user(current_user, user_id)
+
+    validate_progress_note_date(note.date)
+    validate_progress_note_ratings(note)
+
+    conn = get_connection()
+
+    try:
+        existing = conn.execute(
+            """
+            SELECT id
+            FROM progress_notes
+            WHERE id = ?
+              AND user_id = ?
+            """,
+            (note_id, target_user_id),
+        ).fetchone()
+
+        if existing is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Progress note not found",
+            )
+
+        conn.execute(
+            """
+            UPDATE progress_notes
+            SET
+                date = ?,
+                energy = ?,
+                satisfaction = ?,
+                effort = ?,
+                motivation = ?,
+                recovery = ?,
+                soreness = ?,
+                notes = ?
+            WHERE id = ?
+              AND user_id = ?
+            """,
+            (
+                note.date,
+                note.energy,
+                note.satisfaction,
+                note.effort,
+                note.motivation,
+                note.recovery,
+                note.soreness,
+                note.notes,
+                note_id,
+                target_user_id,
+            ),
+        )
+
+        conn.commit()
+
+        row = conn.execute(
+            """
+            SELECT
+                id,
+                user_id,
+                workout_log_id,
+                date,
+                energy,
+                satisfaction,
+                effort,
+                motivation,
+                recovery,
+                soreness,
+                notes,
+                created_at
+            FROM progress_notes
+            WHERE id = ?
+            """,
+            (note_id,),
+        ).fetchone()
+
+        return dict(row)
+
+    finally:
+        conn.close()
+
+
+@app.delete("/api/progress-notes/{note_id}")
+def delete_progress_note(
+    note_id: str,
+    user_id: str,
+    current_user=Depends(get_authenticated_user),
+):
+    target_user_id = resolve_target_user(current_user, user_id)
+
+    conn = get_connection()
+
+    try:
+        existing = conn.execute(
+            """
+            SELECT id
+            FROM progress_notes
+            WHERE id = ?
+              AND user_id = ?
+            """,
+            (note_id, target_user_id),
+        ).fetchone()
+
+        if existing is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Progress note not found",
+            )
+
+        conn.execute(
+            """
+            DELETE FROM progress_notes
+            WHERE id = ?
+              AND user_id = ?
+            """,
+            (note_id, target_user_id),
+        )
+
+        conn.commit()
+
+        return {
+            "message": "Progress note deleted successfully",
+            "id": note_id,
+        }
+
+    finally:
+        conn.close()
+
+
 
 @app.post("/api/body/measurements")
 def create_body_measurement(

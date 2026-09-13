@@ -1769,3 +1769,166 @@ def test_unauthenticated_progress_notes_access_is_rejected(test_db):
 
     assert response.status_code == 401
 
+
+
+def test_user_can_delete_own_workout_and_its_sets(
+    client_pablo,
+    test_db,
+):
+    from app import database
+    import uuid
+
+    conn = database.get_connection()
+
+    workout_id = str(uuid.uuid4())
+    set_id = str(uuid.uuid4())
+
+    conn.execute(
+        """
+        INSERT INTO workout_logs (
+            id, user_id, routine_id, date,
+            duration_minutes, notes, status
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            workout_id,
+            PABLO_ID,
+            None,
+            "2026-09-10T10:00:00",
+            30,
+            "DELETE TEST",
+            "completed",
+        ),
+    )
+
+    conn.execute(
+        """
+        INSERT INTO workout_sets (
+            id, workout_log_id, exercise_id,
+            set_number, weight_kg, reps, rir,
+            is_warmup, notes
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            set_id,
+            workout_id,
+            "0ea08a73-7904-4237-a0f1-2128800c9343",
+            1,
+            10,
+            10,
+            2,
+            0,
+            "DELETE TEST",
+        ),
+    )
+
+    conn.commit()
+    conn.close()
+
+    csrf_token = client_pablo.cookies.get("entrenamiento_csrf")
+    assert csrf_token
+    client_pablo.headers.update({"X-CSRF-Token": csrf_token})
+
+    response = client_pablo.delete(
+        f"/api/workouts/{workout_id}"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+
+    conn = database.get_connection()
+
+    try:
+        workout = conn.execute(
+            "SELECT id FROM workout_logs WHERE id = ?",
+            (workout_id,),
+        ).fetchone()
+
+        workout_sets = conn.execute(
+            "SELECT id FROM workout_sets WHERE workout_log_id = ?",
+            (workout_id,),
+        ).fetchall()
+
+        assert workout is None
+        assert workout_sets == []
+    finally:
+        conn.close()
+
+
+def test_user_cannot_delete_another_users_workout(
+    client_estefi,
+    test_db,
+):
+    from app import database
+    import uuid
+
+    conn = database.get_connection()
+
+    workout_id = str(uuid.uuid4())
+
+    conn.execute(
+        """
+        INSERT INTO workout_logs (
+            id, user_id, routine_id, date,
+            duration_minutes, notes, status
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            workout_id,
+            PABLO_ID,
+            None,
+            "2026-09-10T10:00:00",
+            30,
+            "SECURITY DELETE TEST",
+            "completed",
+        ),
+    )
+
+    conn.commit()
+    conn.close()
+
+    csrf_token = client_estefi.cookies.get("entrenamiento_csrf")
+    assert csrf_token
+    client_estefi.headers.update({"X-CSRF-Token": csrf_token})
+
+    response = client_estefi.delete(
+        f"/api/workouts/{workout_id}"
+    )
+
+    assert response.status_code == 404
+
+    conn = database.get_connection()
+
+    try:
+        workout = conn.execute(
+            "SELECT user_id FROM workout_logs WHERE id = ?",
+            (workout_id,),
+        ).fetchone()
+
+        assert workout is not None
+        assert workout["user_id"] == PABLO_ID
+
+        conn.execute(
+            "DELETE FROM workout_logs WHERE id = ?",
+            (workout_id,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_authenticated_delete_without_csrf_is_rejected(
+    client_pablo,
+    test_db,
+):
+    client_pablo.headers.pop("X-CSRF-Token", None)
+
+    response = client_pablo.delete(
+        "/api/workouts/nonexistent-workout"
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "CSRF validation failed"

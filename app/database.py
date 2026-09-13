@@ -243,6 +243,42 @@ def init_db() -> None:
             FOREIGN KEY (user_id) REFERENCES users(id)
         );
 
+        CREATE TABLE IF NOT EXISTS webauthn_credentials (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            credential_id TEXT NOT NULL UNIQUE,
+            public_key TEXT NOT NULL,
+            sign_count INTEGER NOT NULL DEFAULT 0,
+            transports TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            last_used_at TEXT,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_webauthn_credentials_user
+            ON webauthn_credentials(user_id);
+
+        CREATE INDEX IF NOT EXISTS idx_webauthn_credentials_credential
+            ON webauthn_credentials(credential_id);
+
+
+        CREATE TABLE IF NOT EXISTS webauthn_challenges (
+            id TEXT PRIMARY KEY,
+            user_id TEXT,
+            challenge TEXT NOT NULL UNIQUE,
+            ceremony TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            expires_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+            CHECK (ceremony IN ('registration', 'authentication'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_webauthn_challenges_expires
+            ON webauthn_challenges(expires_at);
+
+        CREATE INDEX IF NOT EXISTS idx_webauthn_challenges_user
+            ON webauthn_challenges(user_id);
+
         CREATE TABLE IF NOT EXISTS auth_sessions (
             id TEXT PRIMARY KEY,
             user_id TEXT NOT NULL,
@@ -297,6 +333,20 @@ def init_db() -> None:
     for column_name, statement in missing_columns:
         if column_name not in exercise_columns:
             conn.execute(statement)
+
+    # Compatibilidad con bases de datos creadas antes de
+    # guardar el ejercicio actual del entrenamiento.
+    workout_log_columns = {
+        row["name"]
+        for row in conn.execute(
+            "PRAGMA table_info(workout_logs)"
+        ).fetchall()
+    }
+
+    if "current_exercise_id" not in workout_log_columns:
+        conn.execute(
+            "ALTER TABLE workout_logs ADD COLUMN current_exercise_id TEXT"
+        )
 
     # Compatibilidad con bases de datos creadas antes de
     # la ampliación de body_metrics para composición corporal.

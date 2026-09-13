@@ -15,6 +15,12 @@ from .auth import (
     CSRF_COOKIE_NAME,
 )
 
+from app.workout_history_routes import (
+    get_in_progress_workout,
+    list_workouts,
+    delete_workout,
+)
+
 
 app = FastAPI(
     title="Entrenamiento",
@@ -23,6 +29,26 @@ app = FastAPI(
 
 app.include_router(auth_router)
 
+app.add_api_route(
+    "/api/workouts/in-progress",
+    get_in_progress_workout,
+    methods=["GET"],
+    name="get_in_progress_workout",
+)
+
+app.add_api_route(
+    "/api/workouts",
+    list_workouts,
+    methods=["GET"],
+    name="list_workouts",
+)
+
+app.add_api_route(
+    "/api/workouts/{workout_id}",
+    delete_workout,
+    methods=["DELETE"],
+    name="delete_workout",
+)
 
 @app.middleware("http")
 async def csrf_protection_middleware(request, call_next):
@@ -3245,7 +3271,8 @@ def get_last_performance(
     }
 
 
-from datetime import datetime
+from datetime import datetime, timezone
+from app.workout_expiration import workout_is_expired
 
 
 class WorkoutCreate(BaseModel):
@@ -3268,6 +3295,7 @@ class WorkoutUpdate(BaseModel):
     status: str
     duration_minutes: int | None = None
     notes: str | None = None
+    current_exercise_id: str | None = None
 
 
 @app.post("/api/workouts")
@@ -3290,6 +3318,51 @@ def create_workout(
             detail="Usuario no encontrado",
         )
 
+    # Solo puede existir una sesión de entrenamiento activa por usuario.
+    # Si existe una sesión antigua, se caduca antes de decidir si puede
+    # reutilizarse.
+    existing_in_progress = conn.execute(
+        """
+        SELECT
+            id,
+            routine_id,
+            date,
+            status,
+            current_exercise_id
+        FROM workout_logs
+        WHERE user_id = ?
+          AND status = 'in_progress'
+        ORDER BY date DESC
+        LIMIT 1
+        """,
+        (user_id,),
+    ).fetchone()
+
+    if existing_in_progress is not None:
+        if workout_is_expired(existing_in_progress["date"]):
+            conn.execute(
+                """
+                UPDATE workout_logs
+                SET status = 'expired'
+                WHERE id = ?
+                  AND user_id = ?
+                  AND status = 'in_progress'
+                """,
+                (existing_in_progress["id"], user_id),
+            )
+            conn.commit()
+        else:
+            conn.close()
+            return {
+                "id": existing_in_progress["id"],
+                "user_id": user_id,
+                "routine_id": existing_in_progress["routine_id"],
+                "date": existing_in_progress["date"],
+                "status": "in_progress",
+                "current_exercise_id": existing_in_progress["current_exercise_id"],
+                "existing": True,
+            }
+
     if workout.routine_id:
         routine = conn.execute(
             """
@@ -3310,7 +3383,7 @@ def create_workout(
             )
 
     workout_id = str(uuid.uuid4())
-    now = datetime.now().isoformat(timespec="seconds")
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     conn.execute(
         """
@@ -4533,6 +4606,8 @@ def get_exercise_substitutions(
         "substitutions": result,
     }
 
+
+
 @app.get("/api/workouts/{workout_id}")
 def get_workout(
     workout_id: str,
@@ -4552,6 +4627,7 @@ def get_workout(
             wl.duration_minutes,
             wl.notes,
             wl.status,
+            wl.current_exercise_id,
             r.name AS routine_name
         FROM workout_logs wl
         LEFT JOIN routines r
@@ -4565,6 +4641,45 @@ def get_workout(
     if workout is None:
         conn.close()
         raise HTTPException(status_code=404, detail="Entrenamiento no encontrado")
+
+    # Si se intenta recuperar una sesión en curso demasiado antigua,
+    # la marcamos como expired. El historial y las series se conservan.
+    if (
+        workout["status"] == "in_progress"
+        and workout_is_expired(workout["date"])
+    ):
+        conn.execute(
+            """
+            UPDATE workout_logs
+            SET status = 'expired'
+            WHERE id = ?
+              AND user_id = ?
+              AND status = 'in_progress'
+            """,
+            (workout_id, user_id),
+        )
+        conn.commit()
+
+        workout = conn.execute(
+            """
+            SELECT
+                wl.id,
+                wl.user_id,
+                wl.routine_id,
+                wl.date,
+                wl.duration_minutes,
+                wl.notes,
+                wl.status,
+                wl.current_exercise_id,
+                r.name AS routine_name
+            FROM workout_logs wl
+            LEFT JOIN routines r
+              ON r.id = wl.routine_id
+            WHERE wl.id = ?
+              AND wl.user_id = ?
+            """,
+            (workout_id, user_id),
+        ).fetchone()
 
     sets = conn.execute(
         """
@@ -4603,6 +4718,7 @@ def get_workout(
         "duration_minutes": workout["duration_minutes"],
         "notes": workout["notes"],
         "status": workout["status"],
+        "current_exercise_id": workout["current_exercise_id"],
         "sets": result_sets,
     }
 
@@ -4619,6 +4735,7 @@ def update_workout(
         "in_progress",
         "completed",
         "cancelled",
+        "expired",
     }:
         raise HTTPException(
             status_code=400,
@@ -4649,8 +4766,8 @@ def update_workout(
 
     current_status = existing["status"]
 
-    # Los entrenamientos finalizados o cancelados son inmutables.
-    if current_status in {"completed", "cancelled"}:
+    # Los entrenamientos finalizados, cancelados o caducados son inmutables.
+    if current_status in {"completed", "cancelled", "expired"}:
         conn.close()
         raise HTTPException(
             status_code=409,
@@ -4688,7 +4805,8 @@ def update_workout(
         SET
             status = ?,
             duration_minutes = ?,
-            notes = ?
+            notes = ?,
+            current_exercise_id = ?
         WHERE id = ?
           AND user_id = ?
         """,
@@ -4696,6 +4814,7 @@ def update_workout(
             workout.status,
             workout.duration_minutes,
             workout.notes,
+            workout.current_exercise_id,
             workout_id,
             user_id,
         ),
@@ -4712,7 +4831,8 @@ def update_workout(
             date,
             duration_minutes,
             notes,
-            status
+            status,
+            current_exercise_id
         FROM workout_logs
         WHERE id = ?
           AND user_id = ?
@@ -4724,5 +4844,4 @@ def update_workout(
 
     return dict(row)
 
-from app.workout_history_routes import router as workout_history_router
-app.include_router(workout_history_router)
+

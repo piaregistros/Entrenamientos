@@ -46,7 +46,10 @@ REGLAS IMPORTANTES:
 8. Responde primero a lo que pregunta. Evita consejos genéricos que no cambien la decisión.
 9. Si faltan datos importantes, dilo y evita falsa precisión.
 10. Las respuestas anteriores del Coach son HISTORIAL, no datos fisiológicos ni hechos nuevos.
-11. No diagnostiques. Si aparecen dolor torácico, dificultad respiratoria, desmayo, síntomas neurológicos o dolor intenso/repentino, recomienda atención médica urgente.
+11. No menciones dolor torácico, síncope, dificultad respiratoria, síntomas neurológicos ni otras señales de alarma si el usuario no las ha mencionado. La advertencia sanitaria es interna, no debe aparecer como texto preventivo genérico.
+12. No recomiendes sauna, hidratación, sueño u otros hábitos si el usuario no los pregunta y no cambian la decisión.
+13. Para "¿qué hice en mi último entrenamiento?", usa exclusivamente "SERIES REALES DEL ÚLTIMO ENTRENAMIENTO". No describas el programa ni los objetivos de la rutina como si fueran lo realizado.
+14. Para "¿puedo hacer B hoy?", no imprimas la rutina completa salvo que se solicite. Da primero SÍ/NO/DEPENDE y justifica con el último entrenamiento real, solapamientos y recuperación.
 """
 
 WEEKDAYS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
@@ -410,10 +413,10 @@ def _context(conn, user_id: str, previous_messages, current_message: str = "") -
     return "\n\n".join(blocks)
 
 
-def _qwen(messages, mode):
+def _qwen(messages, mode, context: str = ""):
     payload = {
         "model": QWEN_MODEL,
-        "messages": [{"role": "system", "content": SYSTEM + "\n\n" + MODES.get(mode, MODES["coach"])}] + messages,
+        "messages": [{"role": "system", "content": SYSTEM + "\n\n" + MODES.get(mode, MODES["coach"]) + "\n\nCONTEXTO REAL DEL USUARIO:\n" + context}] + messages,
         "temperature": 0.20,
         "max_tokens": 1200,
     }
@@ -621,10 +624,7 @@ def chat(p: ChatRequest, current_user=Depends(get_authenticated_user)):
         {"role": x["role"], "content": x["content"]} for x in previous
     ]
     model_messages.append({"role": "user", "content": p.message.strip()})
-    answer = _qwen(
-        [{"role": "system", "content": "CONTEXTO REAL DEL USUARIO:\n\n" + context}] + model_messages,
-        mode,
-    )
+    answer = _qwen(model_messages, mode, context)
 
     now = _local_now().isoformat()
     c.execute(

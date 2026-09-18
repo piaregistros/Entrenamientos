@@ -72,6 +72,9 @@ REGLAS IMPORTANTES:
 27. No conviertas el calendario candidato en una orden de descanso. Las fechas son propuestas de planificación basadas en disponibilidad, no evidencia fisiológica de recuperación.
 28. Para preguntas explícitas sobre si entrenar, hacer la siguiente rutina o cambiar ejercicios, la DECISIÓN OPERATIVA CALCULADA POR BACKEND es autoritativa. El modelo no debe sustituirla por una conclusión propia sobre recuperación, solapamiento o contraindicación.
 29. Si la pregunta pide cambiar ejercicios y el backend proporciona EJERCICIOS A EVITAR/ADAPTAR POR SOLAPAMIENTO DIRECTO, esos ejercicios deben ser reconocidos como tales; no afirmar que no existe solapamiento.
+30. Para preguntas que pidan proponer, recomendar o sugerir ejercicios, usa "SUSTITUCIONES CALCULADAS POR BACKEND (CATÁLOGO REAL)" como lista cerrada. No inventes ejercicios ni añadas alternativas fuera de esa lista.
+31. Una sustitución propuesta por backend debe cambiar el patrón de movimiento y no reutilizar un ejercicio realizado en el último entrenamiento. Si no hay candidato válido, dilo.
+32. Si el backend proporciona candidatos de sustitución, descríbelos como propuestas basadas en el catálogo, no como hechos realizados.
 """
 
 WEEKDAYS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
@@ -182,6 +185,8 @@ def _is_training_adaptation_question(message: str) -> bool:
         r"\bdeber[ií]a cambiar (?:alg[uú]n )?ejercicio",
         r"\bhay que cambiar (?:alg[uú]n )?ejercicio",
         r"\badaptar(?: la| el| los| las)? (?:rutina|sesi[oó]n|ejercicio)",
+        r"\b(?:propon|recomiend|sugier)\w*\s+(?:ejercicio|ejercicios|alternativa|alternativas|sustituci[oó]n|sustituciones)",
+        r"\b(?:qué|que)\s+(?:ejercicio|ejercicios)\s+(?:puedo|podría|podria)\s+(?:hacer|poner|usar)",
     )
     return any(re.search(pattern, text) for pattern in patterns)
 
@@ -238,6 +243,66 @@ def _backend_training_decision_answer(context: str, message: str) -> str | None:
     return "**Sí.** " + decision_match.group(2).strip()
 
 
+def _exercise_substitution_candidates(conn, target_exercises, last_sets):
+    """Return closed substitution candidates from the real exercise catalog."""
+    last_ids = {s["exercise_id"] for s in last_sets if not s["is_warmup"]}
+    last_patterns = {
+        str(s["movement_pattern"]).strip().lower()
+        for s in last_sets if s["movement_pattern"]
+    }
+    last_muscles = {
+        str(s["target_muscle"]).strip().lower()
+        for s in last_sets if s["target_muscle"]
+    }
+    catalog = conn.execute(
+        """SELECT id, name, target_muscle, movement_pattern,
+                  secondary_muscles, equipment
+           FROM exercises WHERE is_active=1 ORDER BY name"""
+    ).fetchall()
+    results = []
+    for target in target_exercises:
+        target_pattern = str(target["movement_pattern"] or "").strip().lower()
+        target_muscle = str(target["target_muscle"] or "").strip().lower()
+        candidates = []
+        for item in catalog:
+            item_pattern = str(item["movement_pattern"] or "").strip().lower()
+            item_muscle = str(item["target_muscle"] or "").strip().lower()
+            if item["id"] in last_ids or item["id"] == target["exercise_id"]:
+                continue
+            if not item_pattern or item_pattern == target_pattern:
+                continue
+            if item_pattern in last_patterns:
+                continue
+            if item_muscle and item_muscle in last_muscles:
+                continue
+            candidates.append(item)
+
+        def score(item):
+            im = str(item["target_muscle"] or "").strip().lower()
+            if target_muscle and im == target_muscle:
+                return (0, str(item["name"]).lower())
+            return (1, str(item["name"]).lower())
+
+        candidates.sort(key=score)
+        results.append({
+            "exercise_id": target["exercise_id"],
+            "exercise_name": target["name"],
+            "target_muscle": target["target_muscle"],
+            "movement_pattern": target["movement_pattern"],
+            "candidates": [
+                {
+                    "id": x["id"],
+                    "name": x["name"],
+                    "target_muscle": x["target_muscle"],
+                    "movement_pattern": x["movement_pattern"],
+                    "equipment": x["equipment"],
+                }
+                for x in candidates[:8]
+            ],
+        })
+    return results
+
+
 def _training_status(conn, user_id: str, previous_messages, current_message: str = "") -> str:
     decision_question = _is_training_decision_question(current_message)
     now = _local_now()
@@ -290,6 +355,7 @@ def _training_status(conn, user_id: str, previous_messages, current_message: str
 
     sets = conn.execute(
         """SELECT ws.exercise_id, e.name AS exercise_name, e.target_muscle,
+                  e.movement_pattern, e.secondary_muscles,
                   ws.set_number, ws.weight_kg, ws.reps, ws.rir,
                   ws.is_warmup, ws.notes
            FROM workout_sets ws
@@ -365,8 +431,10 @@ def _training_status(conn, user_id: str, previous_messages, current_message: str
             after = [r for r in routines if last["day_order"] is not None and r["day_order"] > last["day_order"]]
             candidate = after[0] if after else routines[0]
             ex = conn.execute(
-                """SELECT re.exercise_id, e.name, e.target_muscle, re.target_sets,
-                          re.target_rep_min, re.target_rep_max, re.target_rir, re.rest_seconds
+                """SELECT re.exercise_id, e.name, e.target_muscle, e.movement_pattern,
+                          e.secondary_muscles, e.equipment,
+                          re.target_sets, re.target_rep_min, re.target_rep_max,
+                          re.target_rir, re.rest_seconds
                    FROM routine_exercises re
                    JOIN exercises e ON e.id=re.exercise_id
                    WHERE re.routine_id=?
@@ -419,6 +487,24 @@ def _training_status(conn, user_id: str, previous_messages, current_message: str
                     blocks.append(
                         "DECISIÓN OPERATIVA CALCULADA POR BACKEND: DEPENDE — no hay solapamiento directo detectado, pero el backend no determina por sí solo recuperación fisiológica suficiente."
                     )
+
+            if direct_names:
+                substitutions = _exercise_substitution_candidates(conn, direct, sets)
+                substitution_lines = []
+                for item in substitutions:
+                    names = [x["name"] for x in item["candidates"]]
+                    if names:
+                        substitution_lines.append(
+                            "- " + item["exercise_name"] + " -> " + ", ".join(names)
+                        )
+                    else:
+                        substitution_lines.append(
+                            "- " + item["exercise_name"] + " -> sin candidato válido en el catálogo"
+                        )
+                blocks.append(
+                    "SUSTITUCIONES CALCULADAS POR BACKEND (CATÁLOGO REAL):\n"
+                    + "\n".join(substitution_lines)
+                )
 
             if muscle_overlap:
                 blocks.append("MÚSCULOS CON SOLAPAMIENTO REGISTRADO: " + ", ".join(muscle_overlap))

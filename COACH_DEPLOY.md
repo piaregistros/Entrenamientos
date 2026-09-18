@@ -42,6 +42,26 @@ systemctl status entrenamientos-coach.service --no-pager
 curl http://127.0.0.1:8001/health
 ```
 
+## 1.1 Proveedor de IA
+
+El Coach puede utilizar dos proveedores sin cambiar el frontend:
+
+- `AI_PROVIDER=qwen`: Qwen mediante API compatible OpenAI; en staging puede apuntar al Qwen local de LM Studio.
+- `AI_PROVIDER=gemini`: Gemini mediante la API de Google.
+
+Para probar Gemini en staging, añadir al `/opt/entrenamientos-coach-staging/.coach.env`:
+
+```bash
+AI_PROVIDER=gemini
+GEMINI_API_KEY=TU_CLAVE
+GEMINI_MODEL=gemini-2.5-flash
+GEMINI_BASE_URL=https://generativelanguage.googleapis.com/v1beta
+```
+
+La clave nunca se envía al navegador. No debe guardarse en Git.
+
+El endpoint autenticado `GET /api/coach/health` devuelve el proveedor y modelo activos.
+
 ## 2. Frontend
 
 En CT105:
@@ -68,7 +88,7 @@ curl http://127.0.0.1:8001/health
 curl -I http://127.0.0.1:3000/
 ```
 
-Después abrir la aplicación normalmente. El usuario autenticado verá la pestaña **Coach**. La clave Qwen nunca llega al navegador.
+Después abrir la aplicación normalmente. El usuario autenticado verá la pestaña **Coach**. Las claves de Qwen y Gemini nunca llegan al navegador.
 
 ## 4. Rollback seguro
 

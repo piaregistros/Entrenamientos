@@ -157,20 +157,21 @@ def _is_training_decision_question(message: str) -> bool:
     """Return True only for messages asking whether/how to train now."""
     text = str(message or "").strip().lower()
     patterns = (
-        r"\\bdeber[ií]a entrenar(?: hoy)?\\b",
-        r"\\bpuedo entrenar(?: hoy)?\\b",
-        r"\\bpuedo hacer (?:el |la )?(?:d[ií]a|rutina|entrenamiento)\\b",
-        r"\\bpuedo hacer [abc]\\b",
-        r"\\bhago (?:el |la )?(?:d[ií]a|rutina|entrenamiento)\\b",
-        r"\\bentreno hoy\\b",
-        r"\\bqu[eé] entreno hoy\\b",
-        r"\\bme toca entrenar\\b",
-        r"\\bqu[eé] deber[ií]a entrenar\\b",
+        r"\bdeber[ií]a entrenar(?: hoy)?\\b",
+        r"\bpuedo entrenar(?: hoy)?\\b",
+        r"\bpuedo hacer (?:el |la )?(?:d[ií]a|rutina|entrenamiento)\\b",
+        r"\bpuedo hacer [abc]\\b",
+        r"\bhago (?:el |la )?(?:d[ií]a|rutina|entrenamiento)\\b",
+        r"\bentreno hoy\\b",
+        r"\bqu[eé] entreno hoy\\b",
+        r"\bme toca entrenar\\b",
+        r"\bqu[eé] deber[ií]a entrenar\\b",
     )
     return any(re.search(pattern, text) for pattern in patterns)
 
 
 def _training_status(conn, user_id: str, previous_messages, current_message: str = "") -> str:
+    decision_question = _is_training_decision_question(current_message)
     now = _local_now()
     today = now.date()
 

@@ -192,16 +192,14 @@ def _is_training_adaptation_question(message: str) -> bool:
 
 
 def _backend_training_decision_answer(context: str, message: str) -> str | None:
-    """Render the backend's operational training decision without allowing the LLM to override it."""
+    """Render backend-calculated training decisions and substitutions."""
     decision_match = re.search(
         r"DECISIÓN OPERATIVA CALCULADA POR BACKEND:\s*(SÍ|NO|DEPENDE)\s*[—-]\s*(.+)",
         context,
         re.IGNORECASE,
     )
-    if not decision_match:
-        return None
+    decision = decision_match.group(1).upper() if decision_match else None
 
-    decision = decision_match.group(1).upper()
     direct_match = re.search(
         r"EJERCICIOS A EVITAR/ADAPTAR POR SOLAPAMIENTO DIRECTO:\s*(.+)",
         context,
@@ -211,7 +209,27 @@ def _backend_training_decision_answer(context: str, message: str) -> str | None:
     if direct_match:
         direct_names = [x.strip() for x in direct_match.group(1).split(",") if x.strip()]
 
+    substitution_match = re.search(
+        r"SUSTITUCIONES CALCULADAS POR BACKEND \(CATÁLOGO REAL\):\s*(.*?)(?=\n(?:MÚSCULOS CON SOLAPAMIENTO REGISTRADO|CALENDARIO CANDIDATO EXACTO|$))",
+        context,
+        re.IGNORECASE | re.DOTALL,
+    )
+
     if _is_training_adaptation_question(message):
+        if substitution_match:
+            lines = [
+                x.strip()[2:].strip()
+                for x in substitution_match.group(1).splitlines()
+                if x.strip().startswith("- ")
+            ]
+            if lines:
+                return (
+                    "**Sí.** Estas son las sustituciones calculadas por el backend a partir del catálogo real; "
+                    "no son ejercicios ya realizados:\n"
+                    + "\n".join(f"- {line}" for line in lines)
+                    + "\n\nLa recuperación fisiológica no está determinada por el backend; "
+                      "la adaptación se basa en el solapamiento registrado."
+                )
         if direct_names:
             return (
                 "**Sí.** Adaptaría o sustituiría hoy los ejercicios con solapamiento directo: "
@@ -224,6 +242,9 @@ def _backend_training_decision_answer(context: str, message: str) -> str | None:
             "La recuperación fisiológica no está determinada por el backend."
         )
 
+    if decision is None:
+        return None
+
     if decision == "NO":
         return "**No.** " + decision_match.group(2).strip()
 
@@ -233,7 +254,7 @@ def _backend_training_decision_answer(context: str, message: str) -> str | None:
                 "**Depende.** Hay solapamiento directo con el último entrenamiento en: "
                 + ", ".join(direct_names)
                 + ". La opción operativa es adaptar la sesión y no repetir hoy esos ejercicios. "
-                  "La recuperación fisiológica no está determinada por el backend."
+                "La recuperación fisiológica no está determinada por el backend."
             )
         return (
             "**Depende.** El backend no detecta solapamiento directo, pero tampoco determina por sí solo "

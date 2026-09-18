@@ -63,6 +63,9 @@ REGLAS IMPORTANTES:
 18. Distingue siempre entre HECHO REGISTRADO, DATO CALCULADO y PROPUESTA. Una propuesta de calendario no es un entrenamiento realizado ni una prueba de recuperación.
 19. Para decidir entre SÍ/NO/DEPENDE, usa los datos disponibles sin inventar criterios. Si los datos no permiten establecer una recuperación suficiente o una contraindicación clara, responde DEPENDE y explica brevemente qué dato falta o qué factor impide afirmarlo.
 20. Para preguntas factuales simples sobre un dato concreto del entrenamiento, responde de forma breve y completa. No empieces un desglose largo si no se solicita y nunca dejes la respuesta incompleta.
+21. "TOTAL REPETICIONES DE TRABAJO REAL CALCULADO POR BACKEND" es un dato calculado. Si el usuario pregunta por el total de repeticiones de trabajo reales, usa exactamente ese valor y no vuelvas a sumar las series.
+22. "DECISIÓN DE RECUPERACIÓN" no es una conclusión fisiológica del modelo. Si indica que no está determinada por el backend, no conviertas el RIR medio, los días transcurridos ni la ausencia de notas en una afirmación de buena recuperación.
+23. En preguntas sobre si entrenar hoy o hacer la siguiente rutina, menciona el solapamiento directo calculado por backend cuando exista. No lo sustituyas por una afirmación genérica sobre recuperación.
 """
 
 WEEKDAYS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
@@ -211,6 +214,7 @@ def _training_status(conn, user_id: str, previous_messages, current_message: str
         working = []
         hard = []
         rir_values = []
+        total_working_reps = 0
         exercise_ids = []
         seen = set()
 
@@ -234,6 +238,8 @@ def _training_status(conn, user_id: str, previous_messages, current_message: str
 
             if not s["is_warmup"]:
                 working.append(s)
+                if s["reps"] is not None:
+                    total_working_reps += int(s["reps"])
                 if s["rir"] is not None:
                     rir_values.append(float(s["rir"]))
                     if float(s["rir"]) <= 1:
@@ -251,6 +257,10 @@ def _training_status(conn, user_id: str, previous_messages, current_message: str
             f"RIR medio={avg_rir:.1f}."
             if avg_rir is not None
             else f"RESUMEN DE CARGA REAL: {len(working)} series de trabajo."
+        )
+        blocks.append(
+            "TOTAL REPETICIONES DE TRABAJO REAL CALCULADO POR BACKEND: "
+            f"{total_working_reps}."
         )
 
         next_routine = conn.execute(
@@ -281,6 +291,11 @@ def _training_status(conn, user_id: str, previous_messages, current_message: str
 
             blocks.append(
                 f"SIGUIENTE RUTINA POR ORDEN: Día {candidate['day_order']} — {candidate['name']}."
+            )
+            blocks.append(
+                "DECISIÓN DE RECUPERACIÓN: NO DETERMINADA POR EL BACKEND. "
+                "El RIR, los días transcurridos y el historial no deben convertirse por sí solos "
+                "en una afirmación de recuperación suficiente."
             )
             if direct:
                 blocks.append(

@@ -56,7 +56,13 @@ REGLAS IMPORTANTES:
 11. No menciones dolor torácico, síncope, dificultad respiratoria, síntomas neurológicos ni otras señales de alarma si el usuario no las ha mencionado. La advertencia sanitaria es interna, no debe aparecer como texto preventivo genérico.
 12. No recomiendes sauna, hidratación, sueño u otros hábitos si el usuario no los pregunta y no cambian la decisión.
 13. Para "¿qué hice en mi último entrenamiento?", usa exclusivamente "SERIES REALES DEL ÚLTIMO ENTRENAMIENTO". No describas el programa ni los objetivos de la rutina como si fueran lo realizado.
-14. Para "¿puedo hacer B hoy?", no imprimas la rutina completa salvo que se solicite. Da primero SÍ/NO/DEPENDE y justifica con el último entrenamiento real, solapamientos y recuperación.
+14. Para "¿puedo hacer B hoy?", "¿debería entrenar hoy?" o preguntas equivalentes, no imprimas la rutina completa salvo que se solicite. Da primero SÍ/NO/DEPENDE y justifica con el último entrenamiento real, los solapamientos y los datos de recuperación disponibles.
+15. Los bloques "ESTADO DE ENTRENAMIENTO CALCULADO" y, dentro de ellos, "SOLAPAMIENTO DIRECTO CON EL ÚLTIMO ENTRENAMIENTO" y "MÚSCULOS CON SOLAPAMIENTO REGISTRADO" son hechos calculados por el backend. Tienen prioridad sobre cualquier inferencia del modelo. No los recalcules, contradigas ni sustituyas por una interpretación propia.
+16. No inferir que el usuario está "suficientemente recuperado" solo porque el RIR medio sea alto, bajo o moderado. El RIR describe el esfuerzo registrado de las series; por sí solo no demuestra el estado de recuperación.
+17. Nunca afirmar que un ejercicio no se realizó si aparece en "SERIES REALES DEL ÚLTIMO ENTRENAMIENTO". Si el backend marca un solapamiento directo, debes reconocerlo como tal.
+18. Distingue siempre entre HECHO REGISTRADO, DATO CALCULADO y PROPUESTA. Una propuesta de calendario no es un entrenamiento realizado ni una prueba de recuperación.
+19. Para decidir entre SÍ/NO/DEPENDE, usa los datos disponibles sin inventar criterios. Si los datos no permiten establecer una recuperación suficiente o una contraindicación clara, responde DEPENDE y explica brevemente qué dato falta o qué factor impide afirmarlo.
+20. Para preguntas factuales simples sobre un dato concreto del entrenamiento, responde de forma breve y completa. No empieces un desglose largo si no se solicita y nunca dejes la respuesta incompleta.
 """
 
 WEEKDAYS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]

@@ -70,6 +70,8 @@ REGLAS IMPORTANTES:
 25. "Día N" o "orden N" identifica el orden de la rutina; nunca significa "dentro de N días".
 26. Si el backend indica "DEPENDE" por solapamiento directo, no conviertas esa palabra en un NO absoluto: explica brevemente que la rutina candidata requiere adaptación y señala los ejercicios marcados por backend.
 27. No conviertas el calendario candidato en una orden de descanso. Las fechas son propuestas de planificación basadas en disponibilidad, no evidencia fisiológica de recuperación.
+28. Para preguntas explícitas sobre si entrenar, hacer la siguiente rutina o cambiar ejercicios, la DECISIÓN OPERATIVA CALCULADA POR BACKEND es autoritativa. El modelo no debe sustituirla por una conclusión propia sobre recuperación, solapamiento o contraindicación.
+29. Si la pregunta pide cambiar ejercicios y el backend proporciona EJERCICIOS A EVITAR/ADAPTAR POR SOLAPAMIENTO DIRECTO, esos ejercicios deben ser reconocidos como tales; no afirmar que no existe solapamiento.
 """
 
 WEEKDAYS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
@@ -157,17 +159,83 @@ def _is_training_decision_question(message: str) -> bool:
     """Return True only for messages asking whether/how to train now."""
     text = str(message or "").strip().lower()
     patterns = (
-        r"\bdeber[ií]a entrenar(?: hoy)?\\b",
-        r"\bpuedo entrenar(?: hoy)?\\b",
-        r"\bpuedo hacer (?:el |la )?(?:d[ií]a|rutina|entrenamiento)\\b",
-        r"\bpuedo hacer [abc]\\b",
-        r"\bhago (?:el |la )?(?:d[ií]a|rutina|entrenamiento)\\b",
-        r"\bentreno hoy\\b",
-        r"\bqu[eé] entreno hoy\\b",
-        r"\bme toca entrenar\\b",
-        r"\bqu[eé] deber[ií]a entrenar\\b",
+        r"\bdeber[ií]a entrenar(?: hoy)?\b",
+        r"\bpuedo entrenar(?: hoy)?\b",
+        r"\bpuedo hacer (?:el |la )?(?:d[ií]a|rutina|entrenamiento)\b",
+        r"\bpuedo hacer [abc]\b",
+        r"\bhago (?:el |la )?(?:d[ií]a|rutina|entrenamiento)\b",
+        r"\bentreno hoy\b",
+        r"\bqu[eé] entreno hoy\b",
+        r"\bme toca entrenar\b",
+        r"\bqu[eé] deber[ií]a entrenar\b",
     )
     return any(re.search(pattern, text) for pattern in patterns)
+
+
+def _is_training_adaptation_question(message: str) -> bool:
+    """Return True for questions asking whether the candidate session/exercises should be changed."""
+    text = str(message or "").strip().lower()
+    patterns = (
+        r"\bcambiar[ií]as?(?: algún| algun| el| la| los| las)? ejercicio",
+        r"\bcambiar ejercicio",
+        r"\bqu[eé] ejercicio(?:s)? (?:cambiar|cambiar[ií]as?)\b",
+        r"\bdeber[ií]a cambiar (?:alg[uú]n )?ejercicio",
+        r"\bhay que cambiar (?:alg[uú]n )?ejercicio",
+        r"\badaptar(?: la| el| los| las)? (?:rutina|sesi[oó]n|ejercicio)",
+    )
+    return any(re.search(pattern, text) for pattern in patterns)
+
+
+def _backend_training_decision_answer(context: str, message: str) -> str | None:
+    """Render the backend's operational training decision without allowing the LLM to override it."""
+    decision_match = re.search(
+        r"DECISIÓN OPERATIVA CALCULADA POR BACKEND:\s*(SÍ|NO|DEPENDE)\s*[—-]\s*(.+)",
+        context,
+        re.IGNORECASE,
+    )
+    if not decision_match:
+        return None
+
+    decision = decision_match.group(1).upper()
+    direct_match = re.search(
+        r"EJERCICIOS A EVITAR/ADAPTAR POR SOLAPAMIENTO DIRECTO:\s*(.+)",
+        context,
+        re.IGNORECASE,
+    )
+    direct_names = []
+    if direct_match:
+        direct_names = [x.strip() for x in direct_match.group(1).split(",") if x.strip()]
+
+    if _is_training_adaptation_question(message):
+        if direct_names:
+            return (
+                "**Sí.** Adaptaría o sustituiría hoy los ejercicios con solapamiento directo: "
+                + ", ".join(direct_names)
+                + ". La recuperación fisiológica no está determinada por el backend; "
+                  "la adaptación se basa en el solapamiento registrado."
+            )
+        return (
+            "**No detecto ejercicios que el backend marque para evitar o adaptar por solapamiento directo.** "
+            "La recuperación fisiológica no está determinada por el backend."
+        )
+
+    if decision == "NO":
+        return "**No.** " + decision_match.group(2).strip()
+
+    if decision == "DEPENDE":
+        if direct_names:
+            return (
+                "**Depende.** Hay solapamiento directo con el último entrenamiento en: "
+                + ", ".join(direct_names)
+                + ". La opción operativa es adaptar la sesión y no repetir hoy esos ejercicios. "
+                  "La recuperación fisiológica no está determinada por el backend."
+            )
+        return (
+            "**Depende.** El backend no detecta solapamiento directo, pero tampoco determina por sí solo "
+            "una recuperación fisiológica suficiente."
+        )
+
+    return "**Sí.** " + decision_match.group(2).strip()
 
 
 def _training_status(conn, user_id: str, previous_messages, current_message: str = "") -> str:
@@ -770,7 +838,16 @@ def chat(p: ChatRequest, current_user=Depends(get_authenticated_user)):
         {"role": x["role"], "content": x["content"]} for x in previous
     ]
     model_messages.append({"role": "user", "content": p.message.strip()})
-    answer = _generate_ai_response(model_messages, mode, context)
+
+    # V5.4: training decisions are controlled by backend-calculated facts.
+    # Qwen/Gemini remain responsible for conversational answers elsewhere, but
+    # they cannot override a calculated training decision or direct-overlap adaptation.
+    if _is_training_decision_question(p.message.strip()) or _is_training_adaptation_question(p.message.strip()):
+        answer = _backend_training_decision_answer(context, p.message.strip())
+        if answer is None:
+            answer = _generate_ai_response(model_messages, mode, context)
+    else:
+        answer = _generate_ai_response(model_messages, mode, context)
 
     now = _local_now().isoformat()
     c.execute(

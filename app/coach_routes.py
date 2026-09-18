@@ -41,7 +41,7 @@ REGLAS IMPORTANTES:
 3. No confundas "programado" con "realizado".
 4. No uses reglas rígidas del tipo "24 horas = sí" o "48 horas = no". Valora volumen, RIR, solapamiento de ejercicios/músculos, rendimiento, recuperación y molestias.
 5. Si el usuario pide organizar entrenamientos, da FECHAS Y DÍAS DE LA SEMANA concretos. Respeta las restricciones de disponibilidad indicadas por el usuario.
-6. Una fecha futura es una PROPUESTA, no un hecho. Diferencia claramente DATOS REGISTRADOS de PROPUESTA.
+6. Una fecha futura es una PROPUESTA, no un hecho. Diferencia claramente DATOS REGISTRADOS de PROPUESTA. Si el contexto incluye un CALENDARIO CANDIDATO EXACTO, copia literalmente sus pares fecha/día; no cambies el día de la semana.
 7. No repitas una rutina completa salvo que el usuario la pida.
 8. Responde primero a lo que pregunta. Evita consejos genéricos que no cambien la decisión.
 9. Si faltan datos importantes, dilo y evita falsa precisión.
@@ -93,10 +93,11 @@ def _rows_to_dict(rows):
     return [dict(r) for r in rows]
 
 
-def _conversation_constraints(previous_messages, today: date) -> dict:
+def _conversation_constraints(previous_messages, today: date, current_message: str = "") -> dict:
     """Extract only explicit availability statements from the user's own chat history."""
     text = " ".join(
-        str(x["content"]) for x in previous_messages if x["role"] == "user"
+        [str(x["content"]) for x in previous_messages if x["role"] == "user"]
+        + ([current_message] if current_message else [])
     ).lower()
     unavailable = []
     available = []
@@ -129,7 +130,7 @@ def _conversation_constraints(previous_messages, today: date) -> dict:
     }
 
 
-def _training_status(conn, user_id: str, previous_messages) -> str:
+def _training_status(conn, user_id: str, previous_messages, current_message: str = "") -> str:
     now = _local_now()
     today = now.date()
 
@@ -148,7 +149,7 @@ def _training_status(conn, user_id: str, previous_messages) -> str:
         f"HORA LOCAL APROXIMADA: {now.strftime('%H:%M')}",
     ]
 
-    constraints = _conversation_constraints(previous_messages, today)
+    constraints = _conversation_constraints(previous_messages, today, current_message)
     if constraints["unavailable_weekdays"]:
         blocks.append(
             "DISPONIBILIDAD EXPLÍCITA DEL USUARIO: "
@@ -281,7 +282,7 @@ def _training_status(conn, user_id: str, previous_messages) -> str:
             # They are proposals for the model to evaluate, never facts.
             available_dates = []
             cursor = today
-            for _ in range(10):
+            for _ in range(14):
                 day_name = _weekday(cursor)
                 if day_name not in constraints["unavailable_weekdays"]:
                     available_dates.append(cursor)
@@ -289,22 +290,26 @@ def _training_status(conn, user_id: str, previous_messages) -> str:
 
             sequence = routines[routines.index(candidate):] + routines[:routines.index(candidate)]
             proposal = []
-            date_idx = 0
+            last_scheduled = None
             for r in sequence[:3]:
-                if date_idx >= len(available_dates):
+                chosen = None
+                for candidate_date in available_dates:
+                    if last_scheduled is None or (candidate_date - last_scheduled).days >= 2:
+                        chosen = candidate_date
+                        break
+                if chosen is None:
                     break
                 proposal.append(
-                    f"{_fmt_date(available_dates[date_idx])} ({_weekday(available_dates[date_idx])}) → {r['name']}"
+                    f"{chosen.isoformat()} | {_fmt_date(chosen)} | {_weekday(chosen)} | {r['name']}"
                 )
-                date_idx += 1
-                # Prefer a rest day between proposed sessions when dates allow it.
-                if date_idx < len(available_dates):
-                    date_idx += 1
+                last_scheduled = chosen
+                available_dates = [d for d in available_dates if d > chosen]
 
             if proposal:
                 blocks.append(
-                    "CALENDARIO CANDIDATO PARA LAS PRÓXIMAS 3 SESIONES "
-                    "(PROPUESTA, NO HECHO REGISTRADO):\n- " + "\n- ".join(proposal)
+                    "CALENDARIO CANDIDATO EXACTO (PROPUESTA, NO HECHO REGISTRADO). "
+                    "SI LO MENCIONAS EN LA RESPUESTA, COPIA EXACTAMENTE FECHA Y DÍA DE ESTA LISTA; "
+                    "NO LOS RECALCULES NI LOS CAMBIES:\n- " + "\n- ".join(proposal)
                 )
 
     notes = conn.execute(
@@ -325,7 +330,7 @@ def _training_status(conn, user_id: str, previous_messages) -> str:
     return "\n".join(blocks)
 
 
-def _context(conn, user_id: str, previous_messages) -> str:
+def _context(conn, user_id: str, previous_messages, current_message: str = "") -> str:
     user = conn.execute("SELECT name FROM users WHERE id=?", (user_id,)).fetchone()
     blocks = [f"Nombre: {user['name'] if user else 'usuario'}"]
 
@@ -401,7 +406,7 @@ def _context(conn, user_id: str, previous_messages) -> str:
     if memories:
         blocks.append("MEMORIAS DEL USUARIO:\n" + "\n".join(f"- {m['content']}" for m in memories))
 
-    blocks.append("ESTADO DE ENTRENAMIENTO CALCULADO:\n" + _training_status(conn, user_id, previous_messages))
+    blocks.append("ESTADO DE ENTRENAMIENTO CALCULADO:\n" + _training_status(conn, user_id, previous_messages, current_message))
     return "\n\n".join(blocks)
 
 
@@ -611,7 +616,7 @@ def chat(p: ChatRequest, current_user=Depends(get_authenticated_user)):
     ).fetchall()
     previous = list(reversed(previous))
 
-    context = _context(c, uid, previous)
+    context = _context(c, uid, previous, p.message.strip())
     model_messages = [
         {"role": x["role"], "content": x["content"]} for x in previous
     ]

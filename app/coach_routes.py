@@ -66,6 +66,10 @@ REGLAS IMPORTANTES:
 21. "TOTAL REPETICIONES DE TRABAJO REAL CALCULADO POR BACKEND" es un dato calculado. Si el usuario pregunta por el total de repeticiones de trabajo reales, usa exactamente ese valor y no vuelvas a sumar las series.
 22. "DECISIÓN DE RECUPERACIÓN" no es una conclusión fisiológica del modelo. Si indica que no está determinada por el backend, no conviertas el RIR medio, los días transcurridos ni la ausencia de notas en una afirmación de buena recuperación.
 23. En preguntas sobre si entrenar hoy o hacer la siguiente rutina, menciona el solapamiento directo calculado por backend cuando exista. No lo sustituyas por una afirmación genérica sobre recuperación.
+24. Solo cuando la pregunta actual sea explícitamente una decisión de entrenamiento (por ejemplo, "¿debería entrenar hoy?", "¿puedo hacer B hoy?"), usa "DECISIÓN OPERATIVA CALCULADA POR BACKEND" como dato prioritario y conserva exactamente su SÍ/NO/DEPENDE. No uses ese bloque para responder preguntas factuales que no sean de decisión.
+25. "Día N" o "orden N" identifica el orden de la rutina; nunca significa "dentro de N días".
+26. Si el backend indica "DEPENDE" por solapamiento directo, no conviertas esa palabra en un NO absoluto: explica brevemente que la rutina candidata requiere adaptación y señala los ejercicios marcados por backend.
+27. No conviertas el calendario candidato en una orden de descanso. Las fechas son propuestas de planificación basadas en disponibilidad, no evidencia fisiológica de recuperación.
 """
 
 WEEKDAYS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
@@ -147,6 +151,23 @@ def _conversation_constraints(previous_messages, today: date, current_message: s
         "available_today": today.strftime("%Y-%m-%d") in available,
         "unavailable_dates": dates,
     }
+
+
+def _is_training_decision_question(message: str) -> bool:
+    """Return True only for messages asking whether/how to train now."""
+    text = str(message or "").strip().lower()
+    patterns = (
+        r"\\bdeber[ií]a entrenar(?: hoy)?\\b",
+        r"\\bpuedo entrenar(?: hoy)?\\b",
+        r"\\bpuedo hacer (?:el |la )?(?:d[ií]a|rutina|entrenamiento)\\b",
+        r"\\bpuedo hacer [abc]\\b",
+        r"\\bhago (?:el |la )?(?:d[ií]a|rutina|entrenamiento)\\b",
+        r"\\bentreno hoy\\b",
+        r"\\bqu[eé] entreno hoy\\b",
+        r"\\bme toca entrenar\\b",
+        r"\\bqu[eé] deber[ií]a entrenar\\b",
+    )
+    return any(re.search(pattern, text) for pattern in patterns)
 
 
 def _training_status(conn, user_id: str, previous_messages, current_message: str = "") -> str:
@@ -298,19 +319,45 @@ def _training_status(conn, user_id: str, previous_messages, current_message: str
                 "en una afirmación de recuperación suficiente."
             )
             if direct:
+                direct_names = [x["name"] for x in direct]
                 blocks.append(
                     "SOLAPAMIENTO DIRECTO CON EL ÚLTIMO ENTRENAMIENTO: "
-                    + ", ".join(x["name"] for x in direct)
+                    + ", ".join(direct_names)
                 )
             else:
+                direct_names = []
                 blocks.append("SOLAPAMIENTO DIRECTO CON EL ÚLTIMO ENTRENAMIENTO: ninguno.")
+
+            # V5.3: for an explicit "should/can I train now?" question, calculate
+            # an operational answer from backend facts. This is deliberately not
+            # a physiological recovery verdict: it only determines whether the
+            # candidate session needs adaptation before the model answers.
+            if decision_question:
+                if constraints["unavailable_weekdays"] and _weekday(today) in constraints["unavailable_weekdays"]:
+                    blocks.append(
+                        "DECISIÓN OPERATIVA CALCULADA POR BACKEND: NO — hoy figura como día no disponible según una restricción explícita del usuario."
+                    )
+                elif direct_names:
+                    blocks.append(
+                        "DECISIÓN OPERATIVA CALCULADA POR BACKEND: DEPENDE — la rutina candidata tiene solapamiento directo con el último entrenamiento. "
+                        "La opción operativa es ADAPTAR la sesión: no repetir hoy los ejercicios con solapamiento directo; valorar el resto de la rutina según los datos disponibles."
+                    )
+                    blocks.append(
+                        "EJERCICIOS A EVITAR/ADAPTAR POR SOLAPAMIENTO DIRECTO: "
+                        + ", ".join(direct_names)
+                    )
+                else:
+                    blocks.append(
+                        "DECISIÓN OPERATIVA CALCULADA POR BACKEND: DEPENDE — no hay solapamiento directo detectado, pero el backend no determina por sí solo recuperación fisiológica suficiente."
+                    )
+
             if muscle_overlap:
                 blocks.append("MÚSCULOS CON SOLAPAMIENTO REGISTRADO: " + ", ".join(muscle_overlap))
             else:
                 blocks.append("MÚSCULOS CON SOLAPAMIENTO REGISTRADO: no detectado por los datos disponibles.")
 
             # Candidate dates are deterministic only from explicit availability.
-            # They are proposals for the model to evaluate, never facts.
+            # They are proposals, never a forced recovery interval and never facts.
             available_dates = []
             cursor = today
             for _ in range(14):

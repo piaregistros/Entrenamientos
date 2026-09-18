@@ -24,6 +24,13 @@ QWEN_BASE_URL = os.getenv(
 ).rstrip("/")
 QWEN_API_KEY = os.getenv("QWEN_API_KEY", "") or os.getenv("DASHSCOPE_API_KEY", "")
 QWEN_MODEL = os.getenv("QWEN_MODEL", "qwen3.8-max")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_BASE_URL = os.getenv(
+    "GEMINI_BASE_URL",
+    "https://generativelanguage.googleapis.com/v1beta",
+).rstrip("/")
+AI_PROVIDER = os.getenv("AI_PROVIDER", "qwen").strip().lower()
 MAX_MESSAGE = 12000
 
 MODES = {
@@ -447,6 +454,73 @@ def _qwen(messages, mode, context: str = ""):
     return str(content).strip() or "No he recibido contenido del modelo."
 
 
+def _gemini(messages, mode, context: str = ""):
+    if not GEMINI_API_KEY:
+        raise HTTPException(503, "Gemini API no está configurada en el servidor.")
+
+    system_instruction = (
+        SYSTEM
+        + "\n\n"
+        + MODES.get(mode, MODES["coach"])
+        + "\n\nCONTEXTO REAL DEL USUARIO:\n"
+        + context
+    )
+
+    contents = []
+    for message in messages:
+        role = "model" if message["role"] == "assistant" else "user"
+        contents.append({
+            "role": role,
+            "parts": [{"text": str(message["content"])}],
+        })
+
+    payload = {
+        "system_instruction": {
+            "parts": [{"text": system_instruction}],
+        },
+        "contents": contents,
+        "generationConfig": {
+            "temperature": 0.20,
+            "maxOutputTokens": 1200,
+        },
+    }
+
+    req = Request(
+        f"{GEMINI_BASE_URL}/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}",
+        data=json.dumps(payload, ensure_ascii=False).encode(),
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urlopen(req, timeout=60) as r:
+            data = json.loads(r.read().decode())
+    except HTTPError as e:
+        detail = e.read().decode("utf-8", "replace")[:600]
+        raise HTTPException(502, f"Gemini HTTP {e.code}: {detail}")
+    except URLError as e:
+        raise HTTPException(502, f"No se pudo conectar con Gemini: {e.reason}")
+
+    candidates = data.get("candidates") or []
+    if not candidates:
+        raise HTTPException(502, "Gemini no devolvió una respuesta válida.")
+
+    parts = ((candidates[0].get("content") or {}).get("parts") or [])
+    content = "".join(
+        str(part.get("text", ""))
+        for part in parts
+        if isinstance(part, dict) and part.get("text") is not None
+    ).strip()
+    if not content:
+        raise HTTPException(502, "Gemini devolvió una respuesta vacía.")
+    return content
+
+
+def _generate_ai_response(messages, mode, context: str = ""):
+    if AI_PROVIDER == "gemini":
+        return _gemini(messages, mode, context)
+    return _qwen(messages, mode, context)
+
+
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=MAX_MESSAGE)
     conversation_id: str | None = None
@@ -464,11 +538,14 @@ class MemoryRequest(BaseModel):
 
 @router.get("/health")
 def health(current_user=Depends(get_authenticated_user)):
+    provider = AI_PROVIDER if AI_PROVIDER in {"qwen", "gemini"} else "qwen"
     return {
         "ok": True,
+        "provider": provider,
         "qwen_configured": bool(QWEN_BASE_URL and QWEN_MODEL),
-        "api_key_configured": bool(QWEN_API_KEY),
-        "model": QWEN_MODEL,
+        "gemini_configured": bool(GEMINI_API_KEY and GEMINI_MODEL),
+        "api_key_configured": bool(QWEN_API_KEY if provider == "qwen" else GEMINI_API_KEY),
+        "model": QWEN_MODEL if provider == "qwen" else GEMINI_MODEL,
     }
 
 
@@ -624,7 +701,7 @@ def chat(p: ChatRequest, current_user=Depends(get_authenticated_user)):
         {"role": x["role"], "content": x["content"]} for x in previous
     ]
     model_messages.append({"role": "user", "content": p.message.strip()})
-    answer = _qwen(model_messages, mode, context)
+    answer = _generate_ai_response(model_messages, mode, context)
 
     now = _local_now().isoformat()
     c.execute(

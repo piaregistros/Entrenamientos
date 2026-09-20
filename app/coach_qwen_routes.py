@@ -1,4 +1,4 @@
-"""Coach Qwen: hechos + redacción + validador."""
+"""Coach Qwen: hechos en entrenos; conversación normal en el resto."""
 from __future__ import annotations
 
 import json
@@ -44,14 +44,23 @@ class ChatIn(BaseModel):
 
 def _qwen(messages: list[dict]) -> str:
     import urllib.request
-    payload = json.dumps({"model": QWEN_MODEL, "messages": messages, "temperature": 0.2, "max_tokens": 450}).encode()
+    payload = json.dumps({"model": QWEN_MODEL, "messages": messages, "temperature": 0.45, "max_tokens": 700}).encode()
     req = urllib.request.Request(
         f"{QWEN_BASE}/chat/completions", data=payload,
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {QWEN_KEY}"}, method="POST",
     )
-    with urllib.request.urlopen(req, timeout=45) as resp:
+    with urllib.request.urlopen(req, timeout=60) as resp:
         data = json.loads(resp.read().decode())
     return data["choices"][0]["message"]["content"].strip()
+
+
+def _is_training_q(text: str) -> bool:
+    t = text.lower()
+    return any(w in t for w in (
+        "solap", "entren", "rutina", "día 1", "dia 1", "día 2", "dia 2", "día 3", "dia 3",
+        "puedo hacer", "debo entren", "qué me toca", "que me toca", "mañana qué", "mañana que",
+        "hice la", "hice el", "prensa", "ejercicio",
+    ))
 
 
 def _next_letter(facts: dict) -> str:
@@ -60,32 +69,31 @@ def _next_letter(facts: dict) -> str:
     return m.group(1) if m else ""
 
 
-def _violates(answer: str, facts: dict) -> bool:
+def _violates(answer: str, facts: dict, user_msg: str) -> bool:
+    if not _is_training_q(user_msg):
+        return False
     t = answer.lower()
     if facts.get("direct_overlap") and re.search(r"no hay solap", t):
         return True
     if "buena recuperaci" in t and "rir" in t:
         return True
     nxt = _next_letter(facts)
-    if nxt == "C" and re.search(r"rutina\s*\*\*c\*\*.*no est", t):
-        return True
-    if nxt == "C" and "no está programada" in t and "c" in t:
-        return True
-    if nxt and re.search(rf"seguir con la rutina \*\*[ab]\*\*", t):
-        letter = re.search(r"rutina \*\*([abc])\*\*", t)
-        if letter and letter.group(1).upper() != nxt:
-            return True
-    avail = " ".join(str(x) for x in (facts.get("available_routines") or [])).upper()
-    if "C" in avail and re.search(r"la rutina \*\*c\*\* no", t):
+    if nxt == "C" and "c" in t and "no está programada" in t:
         return True
     return False
 
 
-SYSTEM = """Eres el Coach. Español breve.
-Usa SOLO HECHOS. Orden fijo A→B→C→A.
-Si user_declared existe, esa sesión es la anterior aunque no esté en la app.
-next_routine es la que toca después. No digas que C no existe si sale en available_routines.
-No uses el RIR como recuperación. No inventes.
+SYSTEM = """Eres un compañero de gym que habla claro, en español, sin relleno corporativo.
+
+ENTRENOS (A/B/C, solape, qué toca mañana): obedece HECHOS. No inventes un entreno que no esté ahí.
+Orden A→B→C→A. Si el usuario dice que hizo B y no está en la app, créele en este chat.
+
+TODO LO DEMÁS (suplementos, sueño, hambre, motivación, técnica general): conversa con naturalidad.
+Puedes opinar con lo que se suele considerar razonable (p. ej. proteína, creatina, omega-3, magnesio,
+sueño, no milagros). Una frase de cautela basta; no bloquee la charla ni repitas "consulta a un profesional"
+en cada mensaje. No vendas marcas. No des dosis de receta médica.
+
+Nada de "como modelo de IA no puedo". Sé útil y directo.
 """
 
 
@@ -132,10 +140,12 @@ def chat(body: ChatIn, current_user=Depends(get_authenticated_user)):
     messages.append({"role": "user", "content": msg})
     try:
         answer = _qwen(messages)
-        if not answer or _violates(answer, facts):
+        if _is_training_q(msg) and (not answer or _violates(answer, facts, msg)):
+            answer = fallback
+        if not answer:
             answer = fallback
     except Exception:
-        answer = fallback
+        answer = fallback if _is_training_q(msg) else "Ahora mismo no llego a Qwen. Prueba de nuevo."
 
     conn = get_connection()
     try:

@@ -1,4 +1,4 @@
-"""Dieta determinista. Escala raciones al objetivo; lista de compra agrupada."""
+"""Dieta determinista. Compra = receta original x factor del dia."""
 from __future__ import annotations
 import re
 from datetime import date, timedelta
@@ -7,42 +7,42 @@ from .diet_catalog import GOALS, recipe_by_id, recipes_for
 WEEKDAYS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
 
 ALIASES = [
-    (("pechuga de pollo", "pollo picado", "muslo sin piel", "muslo de pollo", "pollo"), "pollo"),
+    (("pechuga de pollo", "pollo picado", "muslo", "pollo"), "pollo"),
     (("filete de pavo", "pavo picado", "pechuga de pavo", "pavo"), "pavo"),
-    (("ternera magra", "ternera"), "ternera"),
-    (("yogur griego natural", "yogur griego", "yogur proteico", "yogur liquido", "yogur líquido", "yogur"), "yogur"),
-    (("queso cottage", "cottage"), "cottage"),
+    (("ternera",), "ternera"),
+    (("yogur",), "yogur"),
+    (("cottage",), "cottage"),
     (("queso fresco",), "queso fresco"),
     (("requeson", "requesón"), "requeson"),
-    (("copos de avena", "avena"), "avena"),
-    (("arroz crudo", "arroz"), "arroz"),
-    (("pan integral", "rebanada pan integral", "tostada integral", "tostadas", "pan"), "pan integral"),
-    (("lentejas cocidas", "lentejas bote", "lentejas"), "lentejas"),
-    (("garbanzos cocidos", "garbanzos"), "garbanzos"),
+    (("avena",), "avena"),
+    (("arroz",), "arroz"),
+    (("pan", "tostada"), "pan integral"),
+    (("lentejas",), "lentejas"),
+    (("garbanzos",), "garbanzos"),
     (("patata",), "patata"),
     (("quinoa",), "quinoa"),
     (("cuscus", "cuscús"), "cuscus"),
-    (("tofu firme", "tofu"), "tofu"),
-    (("clara", "claras"), "claras de huevo"),
-    (("huevo entero", "huevos", "huevo"), "huevos"),
-    (("leche desnatada", "leche"), "leche"),
+    (("tofu",), "tofu"),
+    (("clara",), "claras"),
+    (("huevo",), "huevos"),
+    (("leche",), "leche"),
     (("platano", "plátano"), "platano"),
     (("manzana",), "manzana"),
     (("kiwi",), "kiwi"),
     (("brocoli", "brócoli"), "brocoli"),
     (("calabacin", "calabacín"), "calabacin"),
     (("pimiento",), "pimiento"),
-    (("zanahoria", "zanahorias"), "zanahoria"),
-    (("espinacas",), "espinacas"),
+    (("zanahoria",), "zanahoria"),
+    (("espinaca",), "espinacas"),
     (("tomate",), "tomate"),
     (("cebolla",), "cebolla"),
-    (("judias verdes", "judías verdes"), "judias verdes"),
-    (("ensalada verde", "ensalada"), "ensalada"),
+    (("judias", "judías"), "judias verdes"),
+    (("ensalada", "lechuga"), "ensalada"),
     (("aguacate",), "aguacate"),
-    (("nueces",), "nueces"),
+    (("nuez", "nueces"), "nueces"),
     (("hummus",), "hummus"),
     (("proteina", "proteína"), "proteina en polvo"),
-    (("aceite oliva", "aove", "aceite"), "aceite de oliva"),
+    (("aceite", "aove"), "aceite de oliva"),
     (("miel",), "miel"),
     (("canela",), "canela"),
 ]
@@ -70,25 +70,13 @@ def pick_recipe(slot, day_index, used_ids):
     return _as_meal(choices[day_index % len(choices)])
 
 def _scale_grams(text, factor):
-    out, num, i = [], "", 0
-    while i < len(text):
-        ch = text[i]
-        if ch.isdigit():
-            num += ch
-            i += 1
-            continue
-        if num:
-            out.append(str(int(round(int(num) * factor))))
-            num = ""
-        out.append(ch)
-        i += 1
-    if num:
-        out.append(str(int(round(int(num) * factor))))
-    return "".join(out)
+    def repl(m):
+        return str(int(round(float(m.group(1)) * factor))) + m.group(2)
+    return re.sub(r"(\d+)(\s*g)\b", repl, text, flags=re.I)
 
 def scale_meals(meals, target_kcal):
     current = sum(m["kcal"] for m in meals) or 1
-    factor = max(0.85, min(target_kcal / current, 1.7))
+    factor = max(0.9, min(target_kcal / current, 1.45))
     factor = round(factor, 2)
     scaled = []
     for m in meals:
@@ -147,47 +135,48 @@ def build_week(*, week_start, goal_id, weight_kg, routines, meals_per_day=4):
         days.append({
             "date": day.isoformat(), "weekday": WEEKDAYS[day.weekday()],
             "kind": kind, "routine_name": None if not info else info["routine_name"],
-            "targets": targets, "planned": planned, "meals": meals, "note": note,
+            "targets": targets, "planned": planned, "meals": meals,
+            "portion_factor": factor, "note": note,
         })
     return {
         "week_start": week_start.isoformat(), "goal": GOALS[goal_id], "weight_kg": weight_kg,
-        "rules": {"no_pork": True, "no_seafood": True, "portions": "gramos ajustados al objetivo"},
+        "rules": {"no_pork": True, "no_seafood": True},
         "days": days,
     }
 
+def _norm(s: str) -> str:
+    s = s.lower()
+    for a, b in (("á", "a"), ("é", "e"), ("í", "i"), ("ó", "o"), ("ú", "u")):
+        s = s.replace(a, b)
+    return s
+
 def _canon(name: str) -> str:
-    n = name.lower().strip()
-    n = n.replace("á", "a").replace("é", "e").replace("í", "i").replace("ó", "o").replace("ú", "u")
+    n = _norm(name)
     for keys, label in ALIASES:
         for k in keys:
             if k in n:
                 return label
-    return n
+    return n.strip()
 
-def _parse_line(line: str):
-    text = line.strip()
-    low = text.lower()
-    grams = 0.0
-    count = 0.0
-    ml = 0.0
+def _parse_catalog_line(line: str):
+    low = _norm(line)
+    grams = ml = count = 0.0
     m = re.search(r"(\d+[\.,]?\d*)\s*g\b", low)
     if m:
         grams = float(m.group(1).replace(",", "."))
     m = re.search(r"(\d+[\.,]?\d*)\s*ml\b", low)
     if m:
         ml = float(m.group(1).replace(",", "."))
-    m = re.search(r"^(\d+)\s+(huevo|clara|rebanada|tostada|platano|manzana|kiwi|tortita)", low)
+    m = re.match(r"\s*(\d+)\s+(huevo|clara|rebanada|tostada|platano|manzana|kiwi|tortita)", low)
     if m:
         count = float(m.group(1))
-    name = _canon(re.sub(r"^\d+[\.,]?\d*\s*(g|ml|cdita)?\s*", "", low))
-    name = re.sub(r"^\d+\s+", "", name).strip(" ,.")
-    if not name:
-        name = text
-    return name, grams, ml, count
+    name = _canon(re.sub(r"\d+[\.,]?\d*\s*(g|ml|cdita)?", " ", low))
+    name = re.sub(r"\s+", " ", name).strip(" ,+")
+    return name or low, grams, ml, count
 
 def _fmt(name, grams, ml, count):
     if grams >= 1000:
-        qty = f"{grams/1000:.1f} kg".replace(".0", "")
+        qty = f"{grams/1000:.1f} kg"
     elif grams > 0:
         qty = f"{int(round(grams))} g"
     elif ml > 0:
@@ -196,20 +185,21 @@ def _fmt(name, grams, ml, count):
         qty = str(int(round(count)))
     else:
         qty = "al gusto"
-    label = name[:1].upper() + name[1:]
-    return f"{label} — {qty}"
+    return f"{name[:1].upper() + name[1:]} — {qty}"
 
 def shopping_list(week):
     bag = {}
     for day in week["days"]:
+        factor = float(day.get("portion_factor") or 1.0)
+        factor = max(0.9, min(factor, 1.45))
         for meal in day["meals"]:
-            recipe = recipe_by_id(meal["recipe_id"])
-            lines = meal.get("ingredients") or (recipe["ingredients"] if recipe else [])
+            rec = recipe_by_id(meal.get("recipe_id"))
+            lines = rec["ingredients"] if rec else []
             for line in lines:
-                name, grams, ml, count = _parse_line(line)
+                name, grams, ml, count = _parse_catalog_line(line)
                 cur = bag.setdefault(name, {"grams": 0.0, "ml": 0.0, "count": 0.0, "hits": 0})
-                cur["grams"] += grams
-                cur["ml"] += ml
+                cur["grams"] += grams * factor
+                cur["ml"] += ml * factor
                 cur["count"] += count
                 cur["hits"] += 1
     out = []

@@ -46,6 +46,14 @@ class LogIn(BaseModel):
     notes: str | None = None
 
 
+class LogEdit(BaseModel):
+    class_id: str | None = None
+    date: str | None = None
+    duration_minutes: int | None = Field(default=None, ge=5, le=240)
+    rpe: int | None = Field(default=None, ge=1, le=10)
+    notes: str | None = None
+
+
 @router.get("/gym")
 def gym_info(current_user=Depends(get_authenticated_user)):
     return GYM
@@ -93,6 +101,39 @@ def list_logs(limit: int = 30, current_user=Depends(get_authenticated_user)):
             (current_user["id"], max(1, min(limit, 100))),
         ).fetchall()
         return {"logs": [dict(r) for r in rows]}
+    finally:
+        conn.close()
+
+
+@router.patch("/log/{log_id}")
+def edit_log(log_id: str, body: LogEdit, current_user=Depends(get_authenticated_user)):
+    init_activity_db()
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT * FROM activity_logs WHERE id=? AND user_id=?", (log_id, current_user["id"])
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "No encontrado")
+        class_id = body.class_id or row["class_id"]
+        spec = class_by_id(class_id)
+        if not spec:
+            raise HTTPException(400, "Clase no reconocida")
+        day = body.date or row["date"]
+        try:
+            date.fromisoformat(day)
+        except ValueError:
+            raise HTTPException(400, "Fecha inválida")
+        minutes = body.duration_minutes if body.duration_minutes is not None else row["duration_minutes"]
+        rpe = body.rpe if body.rpe is not None else row["rpe"]
+        notes = row["notes"] if body.notes is None else body.notes
+        conn.execute(
+            """UPDATE activity_logs SET class_id=?, class_name=?, date=?, duration_minutes=?, rpe=?, notes=?
+               WHERE id=? AND user_id=?""",
+            (spec["id"], spec["name"], day, minutes, rpe, notes, log_id, current_user["id"]),
+        )
+        conn.commit()
+        return {"ok": True, "id": log_id, "class_name": spec["name"], "date": day}
     finally:
         conn.close()
 

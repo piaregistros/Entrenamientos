@@ -16,7 +16,7 @@ from .coach_facts import build_facts, fallback_answer
 router = APIRouter(prefix="/api/coach", tags=["coach-qwen"])
 
 QWEN_BASE = os.environ.get("QWEN_BASE_URL", "http://100.68.49.74:1234/v1")
-QWEN_MODEL = os.environ.get("QWEN_MODEL", "qwen2.5-coder-7b-instruct")
+QWEN_MODEL = os.environ.get("QWEN_MODEL", "qwen3.5-9b-mlx")
 QWEN_KEY = os.environ.get("QWEN_API_KEY", "not-needed")
 
 
@@ -42,16 +42,42 @@ class ChatIn(BaseModel):
     mode: str = "coach"
 
 
+def _extract_text(data: dict) -> str:
+    choice = (data.get("choices") or [{}])[0]
+    msg = choice.get("message") or {}
+    for key in ("content", "reasoning_content", "reasoning"):
+        val = msg.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+        if isinstance(val, list):
+            parts = []
+            for p in val:
+                if isinstance(p, str):
+                    parts.append(p)
+                elif isinstance(p, dict) and p.get("text"):
+                    parts.append(str(p["text"]))
+            if parts:
+                return "".join(parts).strip()
+    if isinstance(choice.get("text"), str) and choice["text"].strip():
+        return choice["text"].strip()
+    return ""
+
+
 def _qwen(messages: list[dict]) -> str:
     import urllib.request
-    payload = json.dumps({"model": QWEN_MODEL, "messages": messages, "temperature": 0.45, "max_tokens": 700}).encode()
+    payload = json.dumps({
+        "model": QWEN_MODEL,
+        "messages": messages,
+        "temperature": 0.5,
+        "max_tokens": 900,
+    }).encode()
     req = urllib.request.Request(
         f"{QWEN_BASE}/chat/completions", data=payload,
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {QWEN_KEY}"}, method="POST",
     )
-    with urllib.request.urlopen(req, timeout=60) as resp:
+    with urllib.request.urlopen(req, timeout=90) as resp:
         data = json.loads(resp.read().decode())
-    return data["choices"][0]["message"]["content"].strip()
+    return _extract_text(data)
 
 
 def _is_training_q(text: str) -> bool:
@@ -83,17 +109,34 @@ def _violates(answer: str, facts: dict, user_msg: str) -> bool:
     return False
 
 
-SYSTEM = """Eres un compañero de gym que habla claro, en español, sin relleno corporativo.
+def _facts_block(facts: dict) -> str:
+    last = facts.get("last_logged") or {}
+    nxt = facts.get("next_routine") or {}
+    declared = facts.get("user_declared")
+    overlap = facts.get("direct_overlap") or []
+    lines = [
+        f"Hoy: {facts.get('today')}",
+        f"Último en la app: {last.get('routine_name')} ({last.get('date')})" if last else "Sin entreno registrado.",
+        f"El usuario ha dicho que hizo: {declared.get('routine_name')}" if declared else "Sin declaración extra.",
+        f"Siguiente por orden: {nxt.get('name')}",
+        f"Rutinas: {', '.join(str(x) for x in (facts.get('available_routines') or []))}",
+        f"Solape directo: {', '.join(overlap) if overlap else 'ninguno'}",
+    ]
+    for a in facts.get("adaptations") or []:
+        lines.append(f"Sustitución {a['from']}: {', '.join(a['to']) or 'sin alternativa'}")
+    lines.append("El RIR no demuestra recuperación.")
+    return "\n".join(lines)
 
-ENTRENOS (A/B/C, solape, qué toca mañana): obedece HECHOS. No inventes un entreno que no esté ahí.
-Orden A→B→C→A. Si el usuario dice que hizo B y no está en la app, créele en este chat.
 
-TODO LO DEMÁS (suplementos, sueño, hambre, motivación, técnica general): conversa con naturalidad.
-Puedes opinar con lo que se suele considerar razonable (p. ej. proteína, creatina, omega-3, magnesio,
-sueño, no milagros). Una frase de cautela basta; no bloquee la charla ni repitas "consulta a un profesional"
-en cada mensaje. No vendas marcas. No des dosis de receta médica.
+SYSTEM = """Eres un compañero de gym. Español natural, frases cortas, sin informe.
 
-Nada de "como modelo de IA no puedo". Sé útil y directo.
+Si te saludan o hablan de cualquier cosa que no sea el plan A/B/C: responde como persona.
+No copies la lista de hechos. No empieces por "En la app el último registrado".
+
+Solo si preguntan qué toca, solape o si pueden entrenar: usa HECHOS y no inventes sesiones.
+Orden A→B→C→A. Si dice que hizo B y no está en la app, créele en este chat.
+
+Suplementos, sueño, hambre: opina con sentido común. Una cautela basta.
 """
 
 
@@ -134,7 +177,13 @@ def chat(body: ChatIn, current_user=Depends(get_authenticated_user)):
         conn.close()
 
     fallback = fallback_answer(facts, msg)
-    messages = [{"role": "system", "content": SYSTEM + "\nHECHOS:\n" + json.dumps(facts, ensure_ascii=False, default=str)}]
+    if not _is_training_q(msg) and re.fullmatch(r"(hola|hey|buenas|buenos días|qué tal)[!?\s]*", msg.lower()):
+        fallback = "Hola. ¿Entreno, dieta o lo que se te ocurra?"
+
+    sys = SYSTEM
+    if _is_training_q(msg):
+        sys += "\nHECHOS:\n" + _facts_block(facts)
+    messages = [{"role": "system", "content": sys}]
     for h in history:
         messages.append({"role": h["role"], "content": h["content"]})
     messages.append({"role": "user", "content": msg})
@@ -145,7 +194,7 @@ def chat(body: ChatIn, current_user=Depends(get_authenticated_user)):
         if not answer:
             answer = fallback
     except Exception:
-        answer = fallback if _is_training_q(msg) else "Ahora mismo no llego a Qwen. Prueba de nuevo."
+        answer = fallback if _is_training_q(msg) else "Ahora mismo no llego al modelo. Prueba otra vez."
 
     conn = get_connection()
     try:
@@ -154,4 +203,4 @@ def chat(body: ChatIn, current_user=Depends(get_authenticated_user)):
         conn.commit()
     finally:
         conn.close()
-    return {"conversation_id": cid, "answer": answer, "facts": facts, "provider": "qwen"}
+    return {"conversation_id": cid, "answer": answer, "provider": "qwen", "model": QWEN_MODEL}

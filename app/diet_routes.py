@@ -11,6 +11,7 @@ from .auth import get_authenticated_user
 from .database import get_connection
 from .diet_catalog import GOALS, RECIPES, recipe_by_id
 from .diet_engine import build_week, shopping_list
+from .diet_swap import swap_meal
 
 router = APIRouter(prefix="/api/diet", tags=["diet"])
 
@@ -70,6 +71,11 @@ class MealLogIn(BaseModel):
     notes: str | None = None
 
 
+class SwapIn(BaseModel):
+    date: str
+    slot: str
+
+
 def _monday(d: date) -> date:
     return d - timedelta(days=d.weekday())
 
@@ -111,10 +117,19 @@ def _generate_and_store(conn, user_id: str, week_start: date, profile: dict) -> 
     return week
 
 
+def _store_week(conn, user_id: str, week: dict) -> None:
+    conn.execute(
+        """INSERT INTO diet_week_plans(id, user_id, week_start, payload) VALUES(?,?,?,?)
+           ON CONFLICT(user_id, week_start) DO UPDATE SET payload=excluded.payload""",
+        (str(uuid4()), user_id, week["week_start"], json.dumps(week, ensure_ascii=False)),
+    )
+    conn.commit()
+
+
 @router.get("/goals")
 def list_goals(current_user=Depends(get_authenticated_user)):
     init_diet_db()
-    return {"goals": list(GOALS.values()), "forbidden": ["cerdo", "marisco", "pescado"]}
+    return {"goals": list(GOALS.values()), "forbidden": ["cerdo", "marisco"]}
 
 
 @router.get("/recipes")
@@ -182,6 +197,32 @@ def regenerate_week(start: str | None = None, current_user=Depends(get_authentic
     conn = get_connection()
     try:
         return _generate_and_store(conn, current_user["id"], week_start, _profile_row(conn, current_user["id"]))
+    finally:
+        conn.close()
+
+
+@router.post("/swap")
+def swap(body: SwapIn, current_user=Depends(get_authenticated_user)):
+    init_diet_db()
+    try:
+        day = date.fromisoformat(body.date)
+    except ValueError:
+        raise HTTPException(400, "Fecha inválida")
+    week_start = _monday(day)
+    conn = get_connection()
+    try:
+        row = conn.execute("SELECT payload FROM diet_week_plans WHERE user_id=? AND week_start=?", (current_user["id"], week_start.isoformat())).fetchone()
+        if row:
+            week = json.loads(row["payload"])
+        else:
+            week = _generate_and_store(conn, current_user["id"], week_start, _profile_row(conn, current_user["id"]))
+        try:
+            week = swap_meal(week, body.date, body.slot)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        _store_week(conn, current_user["id"], week)
+        day_out = next((d for d in week["days"] if d["date"] == body.date), None)
+        return {"ok": True, "week": week, "day": day_out}
     finally:
         conn.close()
 

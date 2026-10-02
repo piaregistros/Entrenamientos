@@ -7,6 +7,9 @@ from pydantic import BaseModel
 
 from .database import get_connection, init_db
 from .auth_routes import router as auth_router
+from .activity_routes import router as activity_router, init_activity_db
+from .diet_routes import router as diet_router, init_diet_db
+from .onboarding_routes import router as onboarding_router
 from .auth import (
     get_authenticated_user,
     require_admin,
@@ -28,6 +31,9 @@ app = FastAPI(
 )
 
 app.include_router(auth_router)
+app.include_router(activity_router)
+app.include_router(diet_router)
+app.include_router(onboarding_router)
 
 app.add_api_route(
     "/api/workouts/in-progress",
@@ -78,6 +84,8 @@ async def csrf_protection_middleware(request, call_next):
 @app.on_event("startup")
 def startup():
     init_db()
+    init_activity_db()
+    init_diet_db()
 
 
 @app.get("/api/health")
@@ -3457,7 +3465,7 @@ def substitute_workout_exercise(
             detail="Entrenamiento no encontrado"
         )
 
-    if workout["status"] != "in_progress":
+    if workout["status"] not in ("in_progress", "completed"):
         conn.close()
         raise HTTPException(
             status_code=409,
@@ -3707,11 +3715,11 @@ def add_workout_set(
             detail="Entrenamiento no encontrado"
         )
 
-    if workout["status"] != "in_progress":
+    if workout["status"] not in ("in_progress", "completed"):
         conn.close()
         raise HTTPException(
             status_code=409,
-            detail="El entrenamiento no está en curso"
+            detail="El entrenamiento no admite series"
         )
 
     # -----------------------------------------------------
@@ -3809,7 +3817,9 @@ def add_workout_set(
                 workout_set.exercise_id,
             )).fetchone()
 
-            if not routine_exercise:
+            # Sesión abierta o ya cerrada: se puede apuntar un extra
+            # (plancha, máquina del gym, etc.) aunque no esté en la rutina.
+            if not routine_exercise and workout["status"] not in ("in_progress", "completed"):
                 conn.close()
 
                 raise HTTPException(
@@ -3983,7 +3993,7 @@ def update_workout_set(
             detail="Entrenamiento no encontrado",
         )
 
-    if workout["status"] != "in_progress":
+    if workout["status"] not in ("in_progress", "completed"):
         conn.close()
         raise HTTPException(
             status_code=409,
@@ -4166,7 +4176,7 @@ def delete_workout_set(
             detail="Entrenamiento no encontrado",
         )
 
-    if workout["status"] != "in_progress":
+    if workout["status"] not in ("in_progress", "completed"):
         conn.close()
         raise HTTPException(
             status_code=409,

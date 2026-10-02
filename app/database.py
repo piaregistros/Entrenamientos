@@ -235,6 +235,44 @@ def init_db() -> None:
 
         CREATE INDEX IF NOT EXISTS idx_workout_substitutions_workout
             ON workout_exercise_substitutions(workout_log_id);
+
+        CREATE TABLE IF NOT EXISTS user_onboarding (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL UNIQUE,
+            onboarding_version INTEGER NOT NULL DEFAULT 1,
+            completed_at TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id)
+                REFERENCES users(id)
+                ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_user_onboarding_user
+            ON user_onboarding(user_id);
+
+        CREATE TABLE IF NOT EXISTS user_training_profiles (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL UNIQUE,
+            assessment_version INTEGER NOT NULL,
+            goal TEXT NOT NULL,
+            experience TEXT NOT NULL,
+            days_per_week INTEGER NOT NULL,
+            duration TEXT NOT NULL,
+            priority TEXT NOT NULL,
+            style TEXT NOT NULL,
+            answers_json TEXT NOT NULL,
+            program_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (user_id)
+                REFERENCES users(id)
+                ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_user_training_profiles_user
+            ON user_training_profiles(user_id);
+
         CREATE TABLE IF NOT EXISTS user_credentials (
             user_id TEXT PRIMARY KEY,
             password_hash TEXT NOT NULL,

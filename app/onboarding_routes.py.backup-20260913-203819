@@ -1,0 +1,54 @@
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends
+
+from .database import get_connection
+from .auth import get_authenticated_user
+from .onboarding import (
+    ONBOARDING_VERSION,
+    complete_onboarding,
+    get_onboarding_status,
+)
+
+
+router = APIRouter(
+    prefix="/api/onboarding",
+    tags=["onboarding"],
+)
+
+
+@router.get("")
+def onboarding_status(
+    current_user=Depends(get_authenticated_user),
+):
+    conn = get_connection()
+
+    try:
+        status = get_onboarding_status(
+            conn,
+            current_user["id"],
+        )
+
+        return {
+            **status,
+            "version": ONBOARDING_VERSION,
+        }
+
+    finally:
+        conn.close()
+
+
+@router.post("/complete")
+def onboarding_complete(
+    current_user=Depends(get_authenticated_user),
+):
+    conn = get_connection()
+
+    try:
+        return complete_onboarding(
+            conn,
+            current_user["id"],
+        )
+
+    finally:
+        conn.close()

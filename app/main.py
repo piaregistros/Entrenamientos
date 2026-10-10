@@ -1,3 +1,4 @@
+import json
 import uuid
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from .database import get_connection, init_db
 from .auth_routes import router as auth_router
 from .activity_routes import router as activity_router, init_activity_db
 from .diet_routes import router as diet_router, init_diet_db
+from .progress_routes import router as progress_router, init_progress_db, apply_progression
 from .onboarding_routes import router as onboarding_router
 from .auth import (
     get_authenticated_user,
@@ -33,6 +35,7 @@ app = FastAPI(
 app.include_router(auth_router)
 app.include_router(activity_router)
 app.include_router(diet_router)
+app.include_router(progress_router)
 app.include_router(onboarding_router)
 
 app.add_api_route(
@@ -3304,6 +3307,7 @@ class WorkoutUpdate(BaseModel):
     duration_minutes: int | None = None
     notes: str | None = None
     current_exercise_id: str | None = None
+    is_deload: int | None = 0
 
 
 @app.post("/api/workouts")
@@ -4830,6 +4834,13 @@ def update_workout(
         ),
     )
 
+    if workout.status == "completed":
+        if getattr(workout, "is_deload", 0):
+            try:
+                conn.execute("UPDATE workout_logs SET is_deload=1 WHERE id=?", (workout_id,))
+            except Exception:
+                pass
+        apply_progression(conn, user_id, workout_id)
     conn.commit()
 
     row = conn.execute(
@@ -4855,3 +4866,64 @@ def update_workout(
     return dict(row)
 
 
+
+
+class ExerciseDraftIn(BaseModel):
+    name: str
+
+class ExerciseCreateIn(BaseModel):
+    name: str
+    target_muscle: str = ""
+    category: str = "otro"
+    equipment: str = ""
+    instructions: str = ""
+    safety_notes: str = ""
+    contraindications: str = ""
+    steps: list[str] = []
+    technical_cues: list[str] = []
+    common_mistakes: list[str] = []
+    weight_increment_kg: float = 2.5
+
+
+@app.post("/api/exercises/draft")
+def draft_new_exercise(body: ExerciseDraftIn, current_user=Depends(get_authenticated_user)):
+    from .exercise_draft import draft_exercise
+    name = body.name.strip()
+    if len(name) < 2:
+        raise HTTPException(status_code=400, detail="Escribe el nombre del ejercicio")
+    return draft_exercise(name)
+
+
+@app.post("/api/exercises")
+def create_exercise(body: ExerciseCreateIn, current_user=Depends(get_authenticated_user)):
+    name = body.name.strip()
+    if len(name) < 2:
+        raise HTTPException(status_code=400, detail="Nombre demasiado corto")
+    conn = get_connection()
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(exercises)")}
+    for col in ("steps", "technical_cues", "common_mistakes", "video_url"):
+        if col not in cols:
+            conn.execute(f"ALTER TABLE exercises ADD COLUMN {col} TEXT")
+    existing = conn.execute("SELECT id FROM exercises WHERE lower(name)=lower(?)", (name,)).fetchone()
+    if existing:
+        conn.close()
+        raise HTTPException(status_code=409, detail="Ese ejercicio ya existe")
+    eid = str(uuid.uuid4())
+    conn.execute(
+        """INSERT INTO exercises (
+            id, name, target_muscle, category, equipment, safety_notes, is_active,
+            instructions, contraindications, steps, technical_cues, common_mistakes,
+            weight_increment_kg, progression_type, rep_progression_enabled
+        ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, 'reps_then_weight', 1)""",
+        (
+            eid, name, body.target_muscle, body.category, body.equipment, body.safety_notes,
+            body.instructions, body.contraindications,
+            json.dumps(body.steps, ensure_ascii=False),
+            json.dumps(body.technical_cues, ensure_ascii=False),
+            json.dumps(body.common_mistakes, ensure_ascii=False),
+            body.weight_increment_kg,
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return {"id": eid, "name": name}

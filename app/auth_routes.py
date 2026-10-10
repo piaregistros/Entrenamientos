@@ -1,4 +1,6 @@
 from __future__ import annotations
+import uuid
+from .auth import create_password_hash
 
 import secrets
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -248,6 +250,135 @@ def me(request: Request, response: Response):
     finally:
         conn.close()
 
+
+
+class AdminCreateUserRequest(BaseModel):
+    name: str
+    password: str
+
+
+class AdminUpdateUserRequest(BaseModel):
+    role: str | None = None
+    password: str | None = None
+
+def _admin_or_403(request: Request):
+    session_token = request.cookies.get(SESSION_COOKIE_NAME)
+    conn = get_connection()
+    admin = get_current_user(conn, session_token)
+    if admin["role"] != "admin":
+        conn.close()
+        raise HTTPException(status_code=403, detail="Solo el admin")
+    return conn, admin
+
+def _admin_count(conn) -> int:
+    row = conn.execute("SELECT COUNT(*) AS n FROM users WHERE role = 'admin'").fetchone()
+    return int(row["n"])
+
+@router.get("/admin/users")
+def admin_list_users(request: Request):
+    conn, _admin = _admin_or_403(request)
+    try:
+        rows = conn.execute(
+            "SELECT id, name, role FROM users ORDER BY lower(name)"
+        ).fetchall()
+        return {"users": [{"id": r["id"], "name": r["name"], "role": r["role"]} for r in rows]}
+    finally:
+        conn.close()
+
+@router.patch("/admin/users/{user_id}")
+def admin_update_user(user_id: str, payload: AdminUpdateUserRequest, request: Request):
+    conn, admin = _admin_or_403(request)
+    try:
+        target = conn.execute("SELECT id, name, role FROM users WHERE id = ?", (user_id,)).fetchone()
+        if target is None:
+            raise HTTPException(status_code=404, detail="Usuario no encontrado")
+        if payload.role is not None:
+            if payload.role not in ("admin", "user"):
+                raise HTTPException(status_code=400, detail="Rol no válido")
+            if user_id == admin["id"] and payload.role != "admin":
+                raise HTTPException(status_code=400, detail="No puedes quitarte el admin")
+            if target["role"] == "admin" and payload.role != "admin" and _admin_count(conn) <= 1:
+                raise HTTPException(status_code=400, detail="Tiene que quedar un admin")
+            conn.execute("UPDATE users SET role = ? WHERE id = ?", (payload.role, user_id))
+        if payload.password is not None:
+            if len(payload.password) < 6:
+                raise HTTPException(status_code=400, detail="La clave debe tener al menos 6 caracteres")
+            conn.execute(
+                """UPDATE user_credentials
+                   SET password_hash = ?, must_change_password = 1, updated_at = datetime('now')
+                   WHERE user_id = ?""",
+                (create_password_hash(payload.password), user_id),
+            )
+        conn.commit()
+        row = conn.execute("SELECT id, name, role FROM users WHERE id = ?", (user_id,)).fetchone()
+        return {"id": row["id"], "name": row["name"], "role": row["role"]}
+    finally:
+        conn.close()
+
+@router.delete("/admin/users/{user_id}")
+def admin_delete_user(user_id: str, request: Request):
+    conn, admin = _admin_or_403(request)
+    try:
+        target = conn.execute("SELECT id, role FROM users WHERE id = ?", (user_id,)).fetchone()
+        if target is None:
+            raise HTTPException(status_code=404, detail="Usuario no encontrado")
+        if user_id == admin["id"]:
+            raise HTTPException(status_code=400, detail="No puedes borrarte a ti mismo")
+        if target["role"] == "admin" and _admin_count(conn) <= 1:
+            raise HTTPException(status_code=400, detail="Tiene que quedar un admin")
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute(
+            "DELETE FROM workout_sets WHERE workout_log_id IN (SELECT id FROM workout_logs WHERE user_id = ?)",
+            (user_id,),
+        )
+        names = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+        if "coach_messages" in names and "coach_conversations" in names:
+            conn.execute(
+                "DELETE FROM coach_messages WHERE conversation_id IN (SELECT id FROM coach_conversations WHERE user_id = ?)",
+                (user_id,),
+            )
+        for name in names:
+            if not name.replace("_", "").isalnum():
+                continue
+            cols = [c[1] for c in conn.execute(f'PRAGMA table_info("{name}")')]
+            if "user_id" in cols:
+                conn.execute(f'DELETE FROM "{name}" WHERE user_id = ?', (user_id,))
+        conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+@router.post("/admin/users")
+def admin_create_user(payload: AdminCreateUserRequest, request: Request):
+    name = payload.name.strip()
+    if len(name) < 2 or len(payload.password) < 6:
+        raise HTTPException(status_code=400, detail="Nombre y contraseña (mínimo 6)")
+    session_token = request.cookies.get(SESSION_COOKIE_NAME)
+    conn = get_connection()
+    try:
+        admin = get_current_user(conn, session_token)
+        if admin["role"] != "admin":
+            raise HTTPException(status_code=403, detail="Solo el admin")
+        exists = conn.execute(
+            "SELECT id FROM users WHERE lower(name) = lower(?)", (name,)
+        ).fetchone()
+        if exists:
+            raise HTTPException(status_code=409, detail="Ese nombre ya existe")
+        uid = str(uuid.uuid4())
+        conn.execute(
+            "INSERT INTO users (id, name, role) VALUES (?, ?, 'user')",
+            (uid, name),
+        )
+        conn.execute(
+            """INSERT INTO user_credentials (user_id, password_hash, updated_at, must_change_password)
+               VALUES (?, ?, datetime('now'), 1)""",
+            (uid, create_password_hash(payload.password)),
+        )
+        conn.commit()
+        return {"id": uid, "name": name, "role": "user", "must_change_password": True}
+    finally:
+        conn.close()
 
 @router.post("/change-password")
 def change_password(
@@ -553,6 +684,23 @@ def webauthn_register_verify(
 
 
 # ============================================================
+
+@router.get("/webauthn/users")
+def webauthn_users():
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT u.name
+            FROM webauthn_credentials c
+            JOIN users u ON u.id = c.user_id
+            ORDER BY u.name
+            """
+        ).fetchall()
+        return {"users": [r["name"] for r in rows]}
+    finally:
+        conn.close()
+
 # WEBAUTHN / PASSKEY — LOGIN OPTIONS
 # ============================================================
 

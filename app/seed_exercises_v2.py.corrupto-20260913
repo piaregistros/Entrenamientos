@@ -1,0 +1,609 @@
+from __future__ import annotations
+
+import sqlite3
+import uuid
+from pathlib import Path
+
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+DB_PATH = BASE_DIR / "data" / "entrenamiento.db"
+
+
+EXERCISES = [
+    {
+        "name": "Curl de bíceps en máquina",
+        "target_muscle": "Bíceps",
+        "category": "brazos",
+        "equipment": "Máquina",
+        "movement_pattern": "flexion_codo",
+        "secondary_muscles": "braquial,braquiorradial",
+        "exercise_type": "aislamiento",
+        "difficulty": "principiante",
+        "laterality": "bilateral",
+    },
+    {
+        "name": "Curl femoral",
+        "target_muscle": "Isquiosurales",
+        "category": "pierna",
+        "equipment": "Máquina",
+        "movement_pattern": "flexion_rodilla",
+        "secondary_muscles": "gemelos",
+        "exercise_type": "aislamiento",
+        "difficulty": "principiante",
+        "laterality": "bilateral",
+    },
+    {
+        "name": "Elevaciones laterales en máquina",
+        "target_muscle": "Deltoides lateral",
+        "category": "hombro",
+        "equipment": "Máquina",
+        "movement_pattern": "abduccion_hombro",
+        "secondary_muscles": "deltoides anterior,deltoides posterior",
+        "exercise_type": "aislamiento",
+        "difficulty": "principiante",
+        "laterality": "bilateral",
+    },
+    {
+        "name": "Extensión de tríceps en polea",
+        "target_muscle": "Tríceps",
+        "category": "brazos",
+        "equipment": "Polea",
+        "movement_pattern": "extension_codo",
+        "secondary_muscles": "ancóneo",
+        "exercise_type": "aislamiento",
+        "difficulty": "principiante",
+        "laterality": "bilateral",
+    },
+    {
+        "name": "Face pull",
+        "target_muscle": "Deltoides posterior y espalda alta",
+        "category": "hombro",
+        "equipment": "Polea",
+        "movement_pattern": "traccion_horizontal",
+        "secondary_muscles": "deltoides posterior,trapecio,romboides",
+        "exercise_type": "aislamiento",
+        "difficulty": "principiante",
+        "laterality": "bilateral",
+    },
+    {
+        "name": "Hip thrust",
+        "target_muscle": "Glúteos",
+        "category": "pierna",
+        "equipment": "Barra o máquina",
+        "movement_pattern": "extension_cadera",
+        "secondary_muscles": "isquiosurales,aductores",
+        "exercise_type": "compuesto",
+        "difficulty": "intermedio",
+        "laterality": "bilateral",
+    },
+    {
+        "name": "Jalón al pecho agarre neutro",
+        "target_muscle": "Dorsal",
+        "category": "tirón",
+        "equipment": "Polea",
+        "movement_pattern": "traccion_vertical",
+        "secondary_muscles": "bíceps,deltoides posterior",
+        "exercise_type": "compuesto",
+        "difficulty": "principiante",
+        "laterality": "bilateral",
+    },
+    {
+        "name": "Plancha",
+        "target_muscle": "Core",
+        "category": "core",
+        "equipment": "Peso corporal",
+        "movement_pattern": "anti_extension",
+        "secondary_muscles": "recto abdominal,oblicuos,transverso",
+        "exercise_type": "core",
+        "difficulty": "principiante",
+        "laterality": "bilateral",
+    },
+    {
+        "name": "Prensa de piernas",
+        "target_muscle": "Cuádriceps y glúteos",
+        "category": "pierna",
+        "equipment": "Máquina",
+        "movement_pattern": "sentadilla",
+        "secondary_muscles": "glúteos,isquiosurales",
+        "exercise_type": "compuesto",
+        "difficulty": "principiante",
+        "laterality": "bilateral",
+    },
+    {
+        "name": "Press banca plano",
+        "target_muscle": "Pectoral",
+        "category": "empuje",
+        "equipment": "Barra",
+        "movement_pattern": "empuje_horizontal",
+        "secondary_muscles": "tríceps,deltoides anterior",
+        "exercise_type": "compuesto",
+        "difficulty": "intermedio",
+        "laterality": "bilateral",
+    },
+    {
+        "name": "Press de hombro con mancuernas agarre neutro",
+        "target_muscle": "Deltoides",
+        "category": "empuje",
+        "equipment": "Mancuernas",
+        "movement_pattern": "empuje_vertical",
+        "secondary_muscles": "tríceps,deltoides lateral",
+        "exercise_type": "compuesto",
+        "difficulty": "intermedio",
+        "laterality": "bilateral",
+    },
+    {
+        "name": "Press inclinado con mancuernas 30 grados",
+        "target_muscle": "Pectoral superior",
+        "category": "empuje",
+        "equipment": "Mancuernas",
+        "movement_pattern": "empuje_horizontal",
+        "secondary_muscles": "tríceps,deltoides anterior",
+        "exercise_type": "compuesto",
+        "difficulty": "intermedio",
+        "laterality": "bilateral",
+    },
+    {
+        "name": "Remo con pecho apoyado",
+        "target_muscle": "Dorsal y espalda media",
+        "category": "tirón",
+        "equipment": "Máquina o banco",
+        "movement_pattern": "traccion_horizontal",
+        "secondary_muscles": "bíceps,deltoides posterior,trapecio,romboides",
+        "exercise_type": "compuesto",
+        "difficulty": "principiante",
+        "laterality": "bilateral",
+    },
+    {
+        "name": "Remo unilateral con mancuerna",
+        "target_muscle": "Dorsal y espalda media",
+        "category": "tirón",
+        "equipment": "Mancuerna",
+        "movement_pattern": "traccion_horizontal",
+        "secondary_muscles": "bíceps,deltoides posterior,trapecio,romboides",
+        "exercise_type": "compuesto",
+        "difficulty": "principiante",
+        "laterality": "unilateral",
+    },
+    {
+        "name": "Sentadilla búlgara",
+        "target_muscle": "Cuádriceps y glúteos",
+        "category": "unilateral",
+        "equipment": "Mancuernas o peso corporal",
+        "movement_pattern": "sentadilla",
+        "secondary_muscles": "glúteos,isquiosurales,aductores",
+        "exercise_type": "compuesto",
+        "difficulty": "intermedio",
+        "laterality": "unilateral",
+    },
+    {
+        "name": "Zancadas",
+        "target_muscle": "Cuádriceps y glúteos",
+        "category": "unilateral",
+        "equipment": "Mancuernas o peso corporal",
+        "movement_pattern": "zancada",
+        "secondary_muscles": "glúteos,isquiosurales,aductores",
+        "exercise_type": "compuesto",
+        "difficulty": "intermedio",
+        "laterality": "unilateral",
+    },
+    {
+        "name": "Sentadilla libre",
+        "target_muscle": "Cuádriceps y glúteos",
+        "category": "pierna",
+        "equipment": "Barra",
+        "movement_pattern": "sentadilla",
+        "secondary_muscles": "isquiosurales,aductores,erectores espinales",
+        "exercise_type": "compuesto",
+        "difficulty": "intermedio",
+        "laterality": "bilateral",
+    },
+    {
+        "name": "Sentadilla goblet",
+        "target_muscle": "Cuádriceps y glúteos",
+        "category": "pierna",
+        "equipment": "Mancuerna",
+        "movement_pattern": "sentadilla",
+        "secondary_muscles": "isquiosurales,aductores,core",
+        "exercise_type": "compuesto",
+        "difficulty": "principiante",
+        "laterality": "bilateral",
+    },
+    {
+        "name": "Hack squat",
+        "target_muscle": "Cuádriceps y glúteos",
+        "category": "pierna",
+        "equipment": "Máquina",
+        "movement_pattern": "sentadilla",
+        "secondary_muscles": "glúteos,isquiosurales",
+        "exercise_type": "compuesto",
+        "difficulty": "principiante",
+        "laterality": "bilateral",
+    },
+    {
+        "name": "Extensión de cuádriceps",
+        "target_muscle": "Cuádriceps",
+        "category": "pierna",
+        "equipment": "Máquina",
+        "movement_pattern": "extension_rodilla",
+        "secondary_muscles": "recto femoral",
+        "exercise_type": "aislamiento",
+        "difficulty": "principiante",
+        "laterality": "bilateral",
+    },
+    {
+        "name": "Peso muerto rumano",
+        "target_muscle": "Isquiosurales y glúteos",
+        "category": "pierna",
+        "equipment": "Barra",
+        "movement_pattern": "bisagra_cadera",
+        "secondary_muscles": "erectores espinales,aductores",
+        "exercise_type": "compuesto",
+        "difficulty": "intermedio",
+        "laterality": "bilateral",
+    },
+    {
+        "name": "Peso muerto rumano con mancuernas",
+        "target_muscle": "Isquiosurales y glúteos",
+        "category": "pierna",
+        "equipment": "Mancuernas",
+        "movement_pattern": "bisagra_cadera",
+        "secondary_muscles": "erectores espinales,aductores",
+        "exercise_type": "compuesto",
+        "difficulty": "intermedio",
+        "laterality": "bilateral",
+    },
+    {
+        "name": "Curl femoral sentado",
+        "target_muscle": "Isquiosurales",
+        "category": "pierna",
+        "equipment": "Máquina",
+        "movement_pattern": "flexion_rodilla",
+        "secondary_muscles": "gemelos",
+        "exercise_type": "aislamiento",
+        "difficulty": "principiante",
+        "laterality": "bilateral",
+    },
+    {
+        "name": "Curl femoral tumbado",
+        "target_muscle": "Isquiosurales",
+        "category": "pierna",
+        "equipment": "Máquina",
+        "movement_pattern": "flexion_rodilla",
+        "secondary_muscles": "gemelos",
+        "exercise_type": "aislamiento",
+        "difficulty": "principiante",
+        "laterality": "bilateral",
+    },
+    {
+        "name": "Patada de glúteo en polea",
+        "target_muscle": "Glúteo mayor",
+        "category": "glúteos",
+        "equipment": "Polea",
+        "movement_pattern": "extension_cadera",
+        "secondary_muscles": "isquiosurales",
+        "exercise_type": "aislamiento",
+        "difficulty": "principiante",
+        "laterality": "unilateral",
+    },
+    {
+        "name": "Abducción de cadera en máquina",
+        "target_muscle": "Glúteo medio",
+        "category": "glúteos",
+        "equipment": "Máquina",
+        "movement_pattern": "abduccion_cadera",
+        "secondary_muscles": "glúteo menor",
+        "exercise_type": "aislamiento",
+        "difficulty": "principiante",
+        "laterality": "bilateral",
+    },
+
+    ]
+
+,
+
+    # ==================== PECHO ====================
+
+    {
+        "name": "Press banca con mancuernas",
+        "target_muscle": "Pectoral",
+        "category": "pecho",
+        "equipment": "Mancuernas",
+        "movement_pattern": "empuje_horizontal",
+        "secondary_muscles": "tríceps,deltoides anterior",
+        "exercise_type": "compuesto",
+        "difficulty": "principiante",
+        "laterality": "bilateral",
+    },
+    {
+        "name": "Press inclinado en máquina",
+        "target_muscle": "Pectoral superior",
+        "category": "pecho",
+        "equipment": "Máquina",
+        "movement_pattern": "empuje_horizontal",
+        "secondary_muscles": "tríceps,deltoides anterior",
+        "exercise_type": "compuesto",
+        "difficulty": "principiante",
+        "laterality": "bilateral",
+    },
+    {
+        "name": "Press convergente de pecho",
+        "target_muscle": "Pectoral",
+        "category": "pecho",
+        "equipment": "Máquina",
+        "movement_pattern": "empuje_horizontal",
+        "secondary_muscles": "tríceps,deltoides anterior",
+        "exercise_type": "compuesto",
+        "difficulty": "principiante",
+        "laterality": "bilateral",
+    },
+    {
+        "name": "Aperturas de pecho en máquina",
+        "target_muscle": "Pectoral",
+        "category": "pecho",
+        "equipment": "Máquina",
+        "movement_pattern": "aduccion_hombro",
+        "secondary_muscles": "deltoides anterior",
+        "exercise_type": "aislamiento",
+        "difficulty": "principiante",
+        "laterality": "bilateral",
+    },
+    {
+        "name": "Cruce de poleas",
+        "target_muscle": "Pectoral",
+        "category": "pecho",
+        "equipment": "Polea",
+        "movement_pattern": "aduccion_hombro",
+        "secondary_muscles": "deltoides anterior",
+        "exercise_type": "aislamiento",
+        "difficulty": "principiante",
+        "laterality": "bilateral",
+    },
+
+    # ==================== ESPALDA ====================
+
+    {
+        "name": "Jalón al pecho agarre amplio",
+        "target_muscle": "Dorsal",
+        "category": "espalda",
+        "equipment": "Polea",
+        "movement_pattern": "traccion_vertical",
+        "secondary_muscles": "bíceps,deltoides posterior",
+        "exercise_type": "compuesto",
+        "difficulty": "principiante",
+        "laterality": "bilateral",
+    },
+    {
+        "name": "Jalón unilateral en polea",
+        "target_muscle": "Dorsal",
+        "category": "espalda",
+        "equipment": "Polea",
+        "movement_pattern": "traccion_vertical",
+        "secondary_muscles": "bíceps,deltoides posterior",
+        "exercise_type": "compuesto",
+        "difficulty": "intermedio",
+        "laterality": "unilateral",
+    },
+    {
+        "name": "Remo sentado en polea",
+        "target_muscle": "Espalda media",
+        "category": "espalda",
+        "equipment": "Polea",
+        "movement_pattern": "traccion_horizontal",
+        "secondary_muscles": "dorsal,bíceps,deltoides posterior",
+        "exercise_type": "compuesto",
+        "difficulty": "principiante",
+        "laterality": "bilateral",
+    },
+    {
+        "name": "Remo unilateral en polea",
+        "target_muscle": "Dorsal y espalda media",
+        "category": "espalda",
+        "equipment": "Polea",
+        "movement_pattern": "traccion_horizontal",
+        "secondary_muscles": "bíceps,deltoides posterior",
+        "exercise_type": "compuesto",
+        "difficulty": "intermedio",
+        "laterality": "unilateral",
+    },
+    {
+        "name": "Remo en máquina",
+        "target_muscle": "Espalda media",
+        "category": "espalda",
+        "equipment": "Máquina",
+        "movement_pattern": "traccion_horizontal",
+        "secondary_muscles": "dorsal,bíceps,deltoides posterior",
+        "exercise_type": "compuesto",
+        "difficulty": "principiante",
+        "laterality": "bilateral",
+    },
+    {
+        "name": "Pullover en polea",
+        "target_muscle": "Dorsal",
+        "category": "espalda",
+        "equipment": "Polea",
+        "movement_pattern": "extension_hombro",
+        "secondary_muscles": "redondo mayor,tríceps cabeza larga",
+        "exercise_type": "aislamiento",
+        "difficulty": "principiante",
+        "laterality": "bilateral",
+    },
+
+    # ==================== HOMBROS ====================
+
+    {
+        "name": "Press militar con barra",
+        "target_muscle": "Deltoides",
+        "category": "hombro",
+        "equipment": "Barra",
+        "movement_pattern": "empuje_vertical",
+        "secondary_muscles": "tríceps,deltoides lateral,trapecio",
+        "exercise_type": "compuesto",
+        "difficulty": "intermedio",
+        "laterality": "bilateral",
+    },
+    {
+        "name": "Press de hombros en máquina",
+        "target_muscle": "Deltoides",
+        "category": "hombro",
+        "equipment": "Máquina",
+        "movement_pattern": "empuje_vertical",
+        "secondary_muscles": "tríceps,deltoides lateral",
+        "exercise_type": "compuesto",
+        "difficulty": "principiante",
+        "laterality": "bilateral",
+    },
+    {
+        "name": "Elevaciones laterales con mancuernas",
+        "target_muscle": "Deltoides lateral",
+        "category": "hombro",
+        "equipment": "Mancuernas",
+        "movement_pattern": "abduccion_hombro",
+        "secondary_muscles": "trapecio",
+        "exercise_type": "aislamiento",
+        "difficulty": "principiante",
+        "laterality": "bilateral",
+    },
+    {
+        "name": "Elevaciones laterales en polea",
+        "target_muscle": "Deltoides lateral",
+        "category": "hombro",
+        "equipment": "Polea",
+        "movement_pattern": "abduccion_hombro",
+        "secondary_muscles": "trapecio",
+        "exercise_type": "aislamiento",
+        "difficulty": "principiante",
+        "laterality": "unilateral",
+    },
+    {
+        "name": "Pájaros en máquina",
+        "target_muscle": "Deltoides posterior",
+        "category": "hombro",
+        "equipment": "Máquina",
+        "movement_pattern": "abduccion_horizontal",
+        "secondary_muscles": "romboides,trapecio",
+        "exercise_type": "aislamiento",
+        "difficulty": "principiante",
+        "laterality": "bilateral",
+    },
+]
+
+def validate_catalog(exercises: list[dict]) -> None:
+    required = {
+        "name",
+        "target_muscle",
+        "category",
+        "equipment",
+        "movement_pattern",
+        "secondary_muscles",
+        "exercise_type",
+        "difficulty",
+        "laterality",
+    }
+
+    names = set()
+
+    for exercise in exercises:
+        missing = required - exercise.keys()
+
+        if missing:
+            raise ValueError(
+                f"{exercise.get('name', '<sin nombre>')}: "
+                f"faltan campos {sorted(missing)}"
+            )
+
+        name = exercise["name"]
+
+        if name in names:
+            raise ValueError(f"Ejercicio duplicado: {name}")
+
+        names.add(name)
+
+
+def upsert_catalog(conn: sqlite3.Connection, exercises: list[dict]) -> None:
+    for exercise in exercises:
+        existing = conn.execute(
+            "SELECT id FROM exercises WHERE name = ?",
+            (exercise["name"],),
+        ).fetchone()
+
+        if existing:
+            exercise_id = existing[0]
+
+            conn.execute(
+                """
+                UPDATE exercises
+                SET target_muscle = ?,
+                    category = ?,
+                    equipment = ?,
+                    movement_pattern = ?,
+                    secondary_muscles = ?,
+                    exercise_type = ?,
+                    difficulty = ?,
+                    laterality = ?,
+                    is_active = 1
+                WHERE id = ?
+                """,
+                (
+                    exercise["target_muscle"],
+                    exercise["category"],
+                    exercise["equipment"],
+                    exercise["movement_pattern"],
+                    exercise["secondary_muscles"],
+                    exercise["exercise_type"],
+                    exercise["difficulty"],
+                    exercise["laterality"],
+                    exercise_id,
+                ),
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO exercises (
+                    id,
+                    name,
+                    target_muscle,
+                    category,
+                    equipment,
+                    is_active,
+                    movement_pattern,
+                    secondary_muscles,
+                    exercise_type,
+                    difficulty,
+                    laterality
+                )
+                VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(uuid.uuid4()),
+                    exercise["name"],
+                    exercise["target_muscle"],
+                    exercise["category"],
+                    exercise["equipment"],
+                    exercise["movement_pattern"],
+                    exercise["secondary_muscles"],
+                    exercise["exercise_type"],
+                    exercise["difficulty"],
+                    exercise["laterality"],
+                ),
+            )
+
+
+def main() -> None:
+    validate_catalog(EXERCISES)
+
+    conn = sqlite3.connect(DB_PATH)
+
+    try:
+        upsert_catalog(conn, EXERCISES)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    print(f"Catálogo validado: {len(EXERCISES)} ejercicios")
+
+
+if __name__ == "__main__":
+    main()

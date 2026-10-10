@@ -1,0 +1,1205 @@
+from dataclasses import dataclass, field
+
+
+MUSCLE_MAP = {
+    "Glúteo mayor": "glutes",
+    "Glúteos": "glutes",
+    "Glúteo medio": "glutes",
+    "Glúteos y cuádriceps": "quads_glutes",
+    "Cuádriceps y glúteos": "quads_glutes",
+    "Cuádriceps": "quads",
+    "Isquiosurales": "hamstrings",
+    "Isquiosurales y glúteos": "ham_glutes",
+    "Pectoral": "chest",
+    "Pectoral superior": "upper_chest",
+    "Dorsal": "back",
+    "Dorsal y espalda media": "back",
+    "Espalda media": "back",
+    "Deltoides": "delts",
+    "Deltoides lateral": "lateral_delts",
+    "Deltoides posterior": "rear_delts",
+    "Deltoides posterior y espalda alta": "rear_delts",
+    "Bíceps": "biceps",
+    "Braquial y bíceps": "biceps",
+    "Tríceps": "triceps",
+    "Gemelos": "calves",
+    "Core": "core",
+    "Recto abdominal": "core",
+}
+
+
+PATTERN_MAP = {
+    "extension_cadera": "hip_extension",
+    "bisagra_cadera": "hinge",
+    "sentadilla": "squat",
+    "zancada": "unilateral_leg",
+    "flexion_rodilla": "knee_flexion",
+    "extension_rodilla": "knee_extension",
+    "empuje_horizontal": "horizontal_push",
+    "empuje_vertical": "vertical_push",
+    "traccion_vertical": "vertical_pull",
+    "traccion_horizontal": "horizontal_pull",
+    "abduccion_hombro": "shoulder_abduction",
+    "abduccion_horizontal": "rear_delt",
+    "aduccion_hombro": "chest_isolation",
+    "flexion_codo": "elbow_flexion",
+    "extension_codo": "elbow_extension",
+    "extension_hombro": "shoulder_extension",
+    "anti_extension": "core",
+}
+
+
+@dataclass
+class Candidate:
+    id: str
+    name: str
+    muscle: str
+    pattern: str
+    category: str
+    difficulty: str
+    laterality: str
+    raw: dict
+
+
+@dataclass
+class PlannedExercise:
+    exercise_id: str
+    name: str
+    target_muscle: str
+    movement_pattern: str
+    sets: int
+    rep_min: int
+    rep_max: int
+    rir: int
+    rest_seconds: int
+    rationale: str = ""
+
+
+@dataclass
+class Session:
+    name: str
+    exercises: list[PlannedExercise] = field(default_factory=list)
+
+    @property
+    def total_sets(self):
+        return sum(x.sets for x in self.exercises)
+
+
+@dataclass
+class EngineProgram:
+    program_id: str
+    sessions: list[Session]
+    weekly_sets: dict[str, int]
+    evidence_notes: list[str] = field(default_factory=list)
+
+
+def _norm(value):
+    return str(value or "").strip().lower()
+
+
+def _profile(profile, key, default=None):
+    return getattr(profile, key, default)
+
+
+def _catalog(rows):
+    result = []
+
+    for row in rows:
+        target = str(row.get("target_muscle", ""))
+        raw_pattern = str(row.get("movement_pattern", ""))
+
+        result.append(
+            Candidate(
+                id=str(row["id"]),
+                name=str(row["name"]),
+                muscle=MUSCLE_MAP.get(target, _norm(target)),
+                pattern=PATTERN_MAP.get(
+                    raw_pattern,
+                    _norm(raw_pattern),
+                ),
+                category=str(row.get("category", "")),
+                difficulty=str(
+                    row.get("difficulty", "principiante")
+                ),
+                laterality=str(
+                    row.get("laterality", "bilateral")
+                ),
+                raw=row,
+            )
+        )
+
+    return result
+
+
+def _sessions(profile):
+    days = _profile(
+        profile,
+        "days_per_week",
+        _profile(profile, "days", 3),
+    )
+    return max(2, min(4, int(days)))
+
+
+def _exercise_limit(profile):
+    duration = str(
+        _profile(profile, "duration", "60")
+    )
+
+    return {
+        "30": 4,
+        "45": 5,
+        "60": 6,
+        "75": 8,
+    }.get(duration, 6)
+
+
+def _difficulty_rank(value):
+    value = _norm(value)
+
+    if value in {"principiante", "beginner"}:
+        return 1
+
+    if value in {"intermedio", "intermediate"}:
+        return 2
+
+    return 3
+
+
+def _candidate_matches(candidate, slot):
+    wanted_muscles = set(slot.get("muscles", []))
+    wanted_patterns = set(slot.get("patterns", []))
+
+    if wanted_muscles and candidate.muscle in wanted_muscles:
+        return True
+
+    if wanted_patterns and candidate.pattern in wanted_patterns:
+        return True
+
+    if slot.get("allow_related"):
+        if "glutes" in wanted_muscles and candidate.muscle in {
+            "quads_glutes",
+            "ham_glutes",
+        }:
+            return True
+
+        if "quads" in wanted_muscles and candidate.muscle == "quads_glutes":
+            return True
+
+        if "hamstrings" in wanted_muscles and candidate.muscle == "ham_glutes":
+            return True
+
+    return False
+
+
+def _candidate_score(candidate, slot, profile, used_names, used_patterns):
+    score = 0
+    experience = _norm(
+        _profile(profile, "experience", "intermediate")
+    )
+    goal = _norm(
+        _profile(profile, "goal", "hypertrophy")
+    )
+
+    if candidate.name in used_names:
+        return -10000
+
+    if candidate.pattern in used_patterns:
+        score -= 30
+
+    if candidate.pattern in slot.get("patterns", []):
+        score += 100
+
+    if candidate.muscle in slot.get("muscles", []):
+        score += 80
+
+    if slot.get("compound") is True:
+        if candidate.category == "compuesto":
+            score += 35
+        else:
+            score -= 20
+
+    if slot.get("isolation") is True:
+        if candidate.category == "aislamiento":
+            score += 30
+
+    if experience == "beginner":
+        rank = _difficulty_rank(candidate.difficulty)
+        score += 25 if rank == 1 else -20
+
+    elif experience == "advanced":
+        if _difficulty_rank(candidate.difficulty) >= 2:
+            score += 10
+
+    if goal == "strength" and candidate.category == "compuesto":
+        score += 40
+
+    if goal == "glutes":
+        if candidate.pattern == "hip_extension":
+            score += 35
+        elif candidate.pattern == "hinge":
+            score += 25
+        elif candidate.pattern == "unilateral_leg":
+            score += 15
+
+    if candidate.laterality == "unilateral":
+        score -= 2
+
+    return score
+
+
+def _choose_slot(candidates, slot, profile, used_names, used_patterns):
+    pool = [
+        c
+        for c in candidates
+        if _candidate_matches(c, slot)
+    ]
+
+    if not pool:
+        return None
+
+    return max(
+        pool,
+        key=lambda c: _candidate_score(
+            c,
+            slot,
+            profile,
+            used_names,
+            used_patterns,
+        ),
+    )
+
+
+def _prescription(candidate, goal, slot=None):
+    compound = candidate.category == "compuesto"
+
+    if goal == "strength":
+        if compound:
+            return 3, 5, 8, 2, 150
+        return 2, 8, 12, 2, 90
+
+    if goal == "glutes":
+        if candidate.pattern in {
+            "hip_extension",
+            "hinge",
+            "squat",
+            "unilateral_leg",
+        } and compound:
+            return 3, 8, 12, 2, 120
+        return 2, 10, 15, 2, 75
+
+    if compound:
+        return 3, 8, 12, 2, 120
+
+    return 2, 10, 15, 2, 75
+
+
+def _reason(candidate, goal, slot):
+    role = slot.get("role", "complementario")
+    pattern = candidate.pattern
+
+    if goal == "strength":
+        return (
+            f"{candidate.name} se utiliza como {role} mediante "
+            f"{pattern}. Al buscar fuerza se priorizan movimientos "
+            "compuestos y rangos de 5-8 repeticiones, con descansos "
+            "largos para limitar la pérdida de rendimiento entre series."
+        )
+
+    if goal == "glutes":
+        return (
+            f"{candidate.name} se utiliza como {role} para aumentar "
+            f"el estímulo de glúteos mediante {pattern}. La sesión "
+            "combina extensión de cadera, trabajo de rodilla y "
+            "aislamiento para distribuir el estímulo y la fatiga."
+        )
+
+    return (
+        f"{candidate.name} se utiliza como {role} mediante "
+        f"{pattern}. La selección busca cubrir diferentes patrones "
+        "de movimiento y repartir el volumen semanal entre sesiones."
+    )
+
+
+def _add_exercise(
+    session,
+    candidate,
+    profile,
+    goal,
+    slot,
+    used_names,
+    used_patterns,
+):
+    if candidate is None:
+        return False
+
+    if candidate.name in used_names:
+        return False
+
+    sets, rep_min, rep_max, rir, rest = _prescription(
+        candidate,
+        goal,
+        slot,
+    )
+
+    session.exercises.append(
+        PlannedExercise(
+            exercise_id=candidate.id,
+            name=candidate.name,
+            target_muscle=candidate.raw.get(
+                "target_muscle",
+                "",
+            ),
+            movement_pattern=candidate.raw.get(
+                "movement_pattern",
+                "",
+            ),
+            sets=sets,
+            rep_min=rep_min,
+            rep_max=rep_max,
+            rir=rir,
+            rest_seconds=rest,
+            rationale=_reason(
+                candidate,
+                goal,
+                slot,
+            ),
+        )
+    )
+
+    used_names.add(candidate.name)
+    used_patterns.add(candidate.pattern)
+
+    return True
+
+
+def _slot(
+    patterns=None,
+    muscles=None,
+    role="complementario",
+    compound=False,
+    isolation=False,
+    allow_related=False,
+):
+    return {
+        "patterns": patterns or [],
+        "muscles": muscles or [],
+        "role": role,
+        "compound": compound,
+        "isolation": isolation,
+        "allow_related": allow_related,
+    }
+
+
+def _templates(profile, goal, days):
+    experience = _norm(
+        _profile(profile, "experience", "intermediate")
+    )
+    priority = _norm(
+        _profile(profile, "priority", "balanced")
+    )
+
+    if experience == "beginner":
+        if days == 2:
+            return [
+                [
+                    _slot(
+                        patterns=["squat"],
+                        muscles=["quads", "quads_glutes"],
+                        role="base de tren inferior",
+                        compound=True,
+                        allow_related=True,
+                    ),
+                    _slot(
+                        patterns=["horizontal_push"],
+                        muscles=["chest"],
+                        role="empuje principal",
+                        compound=True,
+                    ),
+                    _slot(
+                        patterns=["vertical_pull"],
+                        muscles=["back"],
+                        role="tirón principal",
+                        compound=True,
+                    ),
+                    _slot(
+                        patterns=["hinge", "knee_flexion"],
+                        muscles=["hamstrings", "ham_glutes"],
+                        role="cadena posterior",
+                        compound=True,
+                        allow_related=True,
+                    ),
+                ],
+                [
+                    _slot(
+                        patterns=["hip_extension", "unilateral_leg"],
+                        muscles=["glutes", "quads_glutes"],
+                        role="tren inferior",
+                        compound=True,
+                        allow_related=True,
+                    ),
+                    _slot(
+                        patterns=["vertical_push"],
+                        muscles=["delts"],
+                        role="empuje vertical",
+                        compound=True,
+                    ),
+                    _slot(
+                        patterns=["horizontal_pull"],
+                        muscles=["back"],
+                        role="tirón horizontal",
+                        compound=True,
+                    ),
+                    _slot(
+                        patterns=["knee_extension"],
+                        muscles=["quads"],
+                        role="cuádriceps",
+                        isolation=True,
+                    ),
+                ],
+            ]
+
+        return [
+            [
+                _slot(
+                    patterns=["squat"],
+                    muscles=["quads", "quads_glutes"],
+                    role="base de tren inferior",
+                    compound=True,
+                    allow_related=True,
+                ),
+                _slot(
+                    patterns=["horizontal_push"],
+                    muscles=["chest"],
+                    role="empuje principal",
+                    compound=True,
+                ),
+                _slot(
+                    patterns=["vertical_pull"],
+                    muscles=["back"],
+                    role="tirón vertical",
+                    compound=True,
+                ),
+                _slot(
+                    patterns=["hinge"],
+                    muscles=["hamstrings", "ham_glutes"],
+                    role="cadena posterior",
+                    compound=True,
+                    allow_related=True,
+                ),
+                _slot(
+                    patterns=["shoulder_abduction"],
+                    muscles=["lateral_delts", "delts"],
+                    role="deltoides lateral",
+                    isolation=True,
+                ),
+            ],
+            [
+                _slot(
+                    patterns=["hip_extension", "unilateral_leg"],
+                    muscles=["glutes", "quads_glutes"],
+                    role="glúteos y pierna",
+                    compound=True,
+                    allow_related=True,
+                ),
+                _slot(
+                    patterns=["vertical_push"],
+                    muscles=["delts"],
+                    role="empuje vertical",
+                    compound=True,
+                ),
+                _slot(
+                    patterns=["horizontal_pull"],
+                    muscles=["back"],
+                    role="tirón horizontal",
+                    compound=True,
+                ),
+                _slot(
+                    patterns=["knee_flexion"],
+                    muscles=["hamstrings", "ham_glutes"],
+                    role="isquiosurales",
+                    isolation=True,
+                    allow_related=True,
+                ),
+                _slot(
+                    patterns=["knee_extension"],
+                    muscles=["quads"],
+                    role="cuádriceps",
+                    isolation=True,
+                ),
+            ],
+            [
+                _slot(
+                    patterns=["unilateral_leg", "squat"],
+                    muscles=["quads", "quads_glutes"],
+                    role="pierna unilateral",
+                    compound=True,
+                    allow_related=True,
+                ),
+                _slot(
+                    patterns=["horizontal_push"],
+                    muscles=["chest", "upper_chest"],
+                    role="empuje horizontal",
+                    compound=True,
+                ),
+                _slot(
+                    patterns=["vertical_pull"],
+                    muscles=["back"],
+                    role="tirón vertical",
+                    compound=True,
+                ),
+                _slot(
+                    patterns=["hip_extension", "hinge"],
+                    muscles=["glutes", "hamstrings", "ham_glutes"],
+                    role="cadena posterior",
+                    compound=True,
+                    allow_related=True,
+                ),
+                _slot(
+                    patterns=["rear_delt"],
+                    muscles=["rear_delts"],
+                    role="deltoides posterior",
+                    isolation=True,
+                ),
+            ],
+        ]
+
+    if goal == "glutes" or priority == "glutes":
+        base = [
+            [
+                _slot(
+                    patterns=["hip_extension"],
+                    muscles=["glutes"],
+                    role="ejercicio principal de glúteos",
+                    compound=True,
+                ),
+                _slot(
+                    patterns=["hinge"],
+                    muscles=["hamstrings", "ham_glutes"],
+                    role="bisagra de cadera",
+                    compound=True,
+                    allow_related=True,
+                ),
+                _slot(
+                    patterns=["squat"],
+                    muscles=["quads", "quads_glutes"],
+                    role="sentadilla dominante de rodilla",
+                    compound=True,
+                    allow_related=True,
+                ),
+                _slot(
+                    patterns=["vertical_pull"],
+                    muscles=["back"],
+                    role="tirón vertical",
+                    compound=True,
+                ),
+                _slot(
+                    patterns=["shoulder_abduction"],
+                    muscles=["lateral_delts"],
+                    role="deltoides lateral",
+                    isolation=True,
+                ),
+            ],
+            [
+                _slot(
+                    patterns=["unilateral_leg"],
+                    muscles=["quads", "quads_glutes"],
+                    role="trabajo unilateral de glúteos",
+                    compound=True,
+                    allow_related=True,
+                ),
+                _slot(
+                    patterns=["hip_extension"],
+                    muscles=["glutes"],
+                    role="extensión de cadera",
+                    compound=True,
+                ),
+                _slot(
+                    patterns=["knee_flexion"],
+                    muscles=["hamstrings", "ham_glutes"],
+                    role="flexión de rodilla",
+                    isolation=True,
+                    allow_related=True,
+                ),
+                _slot(
+                    patterns=["horizontal_push"],
+                    muscles=["chest", "upper_chest"],
+                    role="empuje horizontal",
+                    compound=True,
+                ),
+                _slot(
+                    patterns=["abduccion_cadera"],
+                    muscles=["glutes"],
+                    role="abducción específica de glúteos",
+                    isolation=True,
+                ),
+            ],
+            [
+                _slot(
+                    patterns=["hinge"],
+                    muscles=["hamstrings", "ham_glutes"],
+                    role="bisagra de cadera",
+                    compound=True,
+                    allow_related=True,
+                ),
+                _slot(
+                    patterns=["hip_extension"],
+                    muscles=["glutes"],
+                    role="extensión de cadera",
+                    compound=True,
+                ),
+                _slot(
+                    patterns=["unilateral_leg"],
+                    muscles=["quads", "quads_glutes"],
+                    role="trabajo unilateral",
+                    compound=True,
+                    allow_related=True,
+                ),
+                _slot(
+                    patterns=["horizontal_pull"],
+                    muscles=["back"],
+                    role="tirón horizontal",
+                    compound=True,
+                ),
+                _slot(
+                    patterns=["knee_extension"],
+                    muscles=["quads"],
+                    role="cuádriceps complementario",
+                    isolation=True,
+                ),
+            ],
+        ]
+
+        if days == 4:
+            base.append(base[1].copy())
+
+        return base[:days]
+
+    if goal == "strength":
+        return [
+            [
+                _slot(
+                    patterns=["horizontal_push"],
+                    muscles=["chest"],
+                    role="empuje principal",
+                    compound=True,
+                ),
+                _slot(
+                    patterns=["horizontal_pull"],
+                    muscles=["back"],
+                    role="tirón principal",
+                    compound=True,
+                ),
+                _slot(
+                    patterns=["vertical_push"],
+                    muscles=["delts"],
+                    role="empuje vertical",
+                    compound=True,
+                ),
+                _slot(
+                    patterns=["vertical_pull"],
+                    muscles=["back"],
+                    role="tirón vertical",
+                    compound=True,
+                ),
+                _slot(
+                    patterns=["elbow_extension"],
+                    muscles=["triceps"],
+                    role="tríceps complementario",
+                    isolation=True,
+                ),
+                _slot(
+                    patterns=["elbow_flexion"],
+                    muscles=["biceps"],
+                    role="bíceps complementario",
+                    isolation=True,
+                ),
+            ],
+            [
+                _slot(
+                    patterns=["squat"],
+                    muscles=["quads", "quads_glutes"],
+                    role="patrón principal de pierna",
+                    compound=True,
+                    allow_related=True,
+                ),
+                _slot(
+                    patterns=["hinge"],
+                    muscles=["hamstrings", "ham_glutes"],
+                    role="bisagra principal",
+                    compound=True,
+                    allow_related=True,
+                ),
+                _slot(
+                    patterns=["hip_extension"],
+                    muscles=["glutes"],
+                    role="extensión de cadera",
+                    compound=True,
+                ),
+                _slot(
+                    patterns=["knee_flexion"],
+                    muscles=["hamstrings"],
+                    role="isquiosurales complementario",
+                    isolation=True,
+                ),
+                _slot(
+                    patterns=["knee_extension"],
+                    muscles=["quads"],
+                    role="cuádriceps complementario",
+                    isolation=True,
+                ),
+                _slot(
+                    patterns=["calf"],
+                    muscles=["calves"],
+                    role="gemelos",
+                    isolation=True,
+                ),
+            ],
+            [
+                _slot(
+                    patterns=["horizontal_push"],
+                    muscles=["chest", "upper_chest"],
+                    role="segundo empuje horizontal",
+                    compound=True,
+                ),
+                _slot(
+                    patterns=["vertical_pull"],
+                    muscles=["back"],
+                    role="tirón vertical",
+                    compound=True,
+                ),
+                _slot(
+                    patterns=["horizontal_pull"],
+                    muscles=["back"],
+                    role="tirón horizontal",
+                    compound=True,
+                ),
+                _slot(
+                    patterns=["vertical_push"],
+                    muscles=["delts"],
+                    role="segundo empuje vertical",
+                    compound=True,
+                ),
+                _slot(
+                    patterns=["rear_delt"],
+                    muscles=["rear_delts"],
+                    role="deltoides posterior",
+                    isolation=True,
+                ),
+                _slot(
+                    patterns=["elbow_flexion"],
+                    muscles=["biceps"],
+                    role="bíceps",
+                    isolation=True,
+                ),
+            ],
+            [
+                _slot(
+                    patterns=["squat"],
+                    muscles=["quads"],
+                    role="segundo patrón de pierna",
+                    compound=True,
+                    allow_related=True,
+                ),
+                _slot(
+                    patterns=["hinge"],
+                    muscles=["hamstrings"],
+                    role="segunda bisagra",
+                    compound=True,
+                    allow_related=True,
+                ),
+                _slot(
+                    patterns=["unilateral_leg"],
+                    muscles=["quads_glutes", "quads"],
+                    role="trabajo unilateral",
+                    compound=True,
+                    allow_related=True,
+                ),
+                _slot(
+                    patterns=["hip_extension"],
+                    muscles=["glutes"],
+                    role="glúteos",
+                    compound=True,
+                ),
+                _slot(
+                    patterns=["knee_flexion"],
+                    muscles=["hamstrings"],
+                    role="isquiosurales",
+                    isolation=True,
+                ),
+                _slot(
+                    patterns=["calf"],
+                    muscles=["calves"],
+                    role="gemelos",
+                    isolation=True,
+                ),
+            ],
+        ][:days]
+
+    return [
+        [
+            _slot(
+                patterns=["squat"],
+                muscles=["quads", "quads_glutes"],
+                role="dominante de rodilla",
+                compound=True,
+                allow_related=True,
+            ),
+            _slot(
+                patterns=["horizontal_push"],
+                muscles=["chest", "upper_chest"],
+                role="empuje horizontal",
+                compound=True,
+            ),
+            _slot(
+                patterns=["vertical_pull"],
+                muscles=["back"],
+                role="tirón vertical",
+                compound=True,
+            ),
+            _slot(
+                patterns=["hinge"],
+                muscles=["hamstrings", "ham_glutes"],
+                role="cadena posterior",
+                compound=True,
+                allow_related=True,
+            ),
+            _slot(
+                patterns=["shoulder_abduction"],
+                muscles=["lateral_delts"],
+                role="deltoides lateral",
+                isolation=True,
+            ),
+            _slot(
+                patterns=["elbow_flexion"],
+                muscles=["biceps"],
+                role="bíceps",
+                isolation=True,
+            ),
+        ],
+        [
+            _slot(
+                patterns=["hip_extension", "unilateral_leg"],
+                muscles=["glutes", "quads_glutes"],
+                role="dominante de cadera",
+                compound=True,
+                allow_related=True,
+            ),
+            _slot(
+                patterns=["vertical_push"],
+                muscles=["delts"],
+                role="empuje vertical",
+                compound=True,
+            ),
+            _slot(
+                patterns=["horizontal_pull"],
+                muscles=["back"],
+                role="tirón horizontal",
+                compound=True,
+            ),
+            _slot(
+                patterns=["knee_flexion"],
+                muscles=["hamstrings", "ham_glutes"],
+                role="isquiosurales",
+                isolation=True,
+                allow_related=True,
+            ),
+            _slot(
+                patterns=["chest_isolation"],
+                muscles=["chest"],
+                role="pectoral complementario",
+                isolation=True,
+            ),
+            _slot(
+                patterns=["elbow_extension"],
+                muscles=["triceps"],
+                role="tríceps",
+                isolation=True,
+            ),
+        ],
+        [
+            _slot(
+                patterns=["unilateral_leg"],
+                muscles=["quads", "quads_glutes"],
+                role="pierna unilateral",
+                compound=True,
+                allow_related=True,
+            ),
+            _slot(
+                patterns=["horizontal_push"],
+                muscles=["upper_chest", "chest"],
+                role="segundo empuje",
+                compound=True,
+            ),
+            _slot(
+                patterns=["vertical_pull"],
+                muscles=["back"],
+                role="segundo tirón vertical",
+                compound=True,
+            ),
+            _slot(
+                patterns=["hinge"],
+                muscles=["hamstrings", "ham_glutes"],
+                role="segunda bisagra",
+                compound=True,
+                allow_related=True,
+            ),
+            _slot(
+                patterns=["rear_delt"],
+                muscles=["rear_delts"],
+                role="deltoides posterior",
+                isolation=True,
+            ),
+            _slot(
+                patterns=["shoulder_abduction"],
+                muscles=["lateral_delts"],
+                role="deltoides lateral",
+                isolation=True,
+            ),
+        ],
+    ][:days]
+
+
+def _muscle_key(candidate):
+    if candidate.muscle in {"quads_glutes"}:
+        return "glutes"
+    if candidate.muscle in {"ham_glutes"}:
+        return "hamstrings"
+    if candidate.muscle in {"upper_chest"}:
+        return "chest"
+    if candidate.muscle in {"lateral_delts", "rear_delts"}:
+        return "delts"
+    return candidate.muscle
+
+
+def _calculate_volume(sessions):
+    result = {}
+
+    for session in sessions:
+        for exercise in session.exercises:
+            muscle = MUSCLE_MAP.get(
+                exercise.target_muscle,
+                _norm(exercise.target_muscle),
+            )
+
+            if muscle == "quads_glutes":
+                result["quads"] = result.get("quads", 0) + exercise.sets
+                result["glutes"] = result.get("glutes", 0) + exercise.sets
+            elif muscle == "ham_glutes":
+                result["hamstrings"] = result.get("hamstrings", 0) + exercise.sets
+                result["glutes"] = result.get("glutes", 0) + exercise.sets
+            elif muscle == "upper_chest":
+                result["chest"] = result.get("chest", 0) + exercise.sets
+            elif muscle in {"lateral_delts", "rear_delts"}:
+                result["delts"] = result.get("delts", 0) + exercise.sets
+            else:
+                result[muscle] = result.get(muscle, 0) + exercise.sets
+
+    return result
+
+
+def _evidence(goal):
+    notes = [
+        (
+            "El programa distribuye el trabajo semanal entre varias "
+            "sesiones para favorecer la calidad de las series y la recuperación."
+        ),
+        (
+            "Se utiliza normalmente RIR 2 como punto de partida: "
+            "permite entrenar cerca del fallo sin exigir fallo muscular "
+            "sistemático en todas las series."
+        ),
+        (
+            "Los ejercicios compuestos utilizan descansos más largos "
+            "para reducir la pérdida de rendimiento entre series."
+        ),
+        (
+            "La selección prioriza cubrir diferentes patrones de movimiento "
+            "antes de añadir volumen accesorio."
+        ),
+        (
+            "La hipertrofia puede lograrse con diferentes rangos de carga; "
+            "el motor utiliza rangos moderados y ajusta la prescripción al objetivo."
+        ),
+    ]
+
+    if goal == "strength":
+        notes.append(
+            "En fuerza se priorizan ejercicios compuestos, rangos de "
+            "5-8 repeticiones y descansos de aproximadamente 150 segundos."
+        )
+
+    if goal == "glutes":
+        notes.append(
+            "En el objetivo glúteos se priorizan extensión de cadera, "
+            "bisagra y trabajo unilateral, complementados con aislamiento."
+        )
+
+    return notes
+
+
+def _validate_program(program, limit):
+    assert program.sessions
+
+    for session in program.sessions:
+        assert 1 <= len(session.exercises) <= limit
+        names = [x.name for x in session.exercises]
+        assert len(names) == len(set(names))
+
+        for exercise in session.exercises:
+            assert exercise.sets > 0
+            assert exercise.rep_min > 0
+            assert exercise.rep_max >= exercise.rep_min
+            assert 0 <= exercise.rir <= 5
+            assert exercise.rest_seconds >= 45
+            assert exercise.rationale
+
+
+def generate_engine_program(profile, catalog):
+    candidates = _catalog(catalog)
+
+    days = _sessions(profile)
+    limit = _exercise_limit(profile)
+
+    goal = _norm(
+        _profile(profile, "goal", "hypertrophy")
+    )
+    priority = _norm(
+        _profile(profile, "priority", "balanced")
+    )
+
+    if goal == "strength":
+        program_id = f"strength_{days}"
+    elif goal == "glutes" or priority == "glutes":
+        program_id = f"glutes_{days}"
+    elif _norm(_profile(profile, "experience", "")) == "beginner":
+        program_id = f"beginner_{days}_full_body"
+    elif days >= 4:
+        program_id = "upper_lower_4"
+    else:
+        program_id = "hypertrophy_3"
+
+    templates = _templates(profile, goal, days)
+
+    sessions = [
+        Session(f"Día {chr(65 + i)}")
+        for i in range(days)
+    ]
+
+    global_used = set()
+
+    for index, session in enumerate(sessions):
+        slots = templates[index % len(templates)]
+        used_names = set()
+        used_patterns = set()
+
+        for slot in slots:
+            if len(session.exercises) >= limit:
+                break
+
+            candidate = _choose_slot(
+                candidates,
+                slot,
+                profile,
+                used_names,
+                used_patterns,
+            )
+
+            if candidate is None:
+                continue
+
+            added = _add_exercise(
+                session,
+                candidate,
+                profile,
+                goal,
+                slot,
+                used_names,
+                used_patterns,
+            )
+
+            if added:
+                global_used.add(candidate.name)
+
+        # Segundo pase: completar la sesión si el catálogo permite hacerlo.
+        if len(session.exercises) < min(limit, len(slots)):
+            remaining = [
+                c
+                for c in candidates
+                if c.name not in used_names
+            ]
+
+            remaining.sort(
+                key=lambda c: (
+                    c.name in global_used,
+                    c.category != "compuesto",
+                    c.pattern in used_patterns,
+                )
+            )
+
+            for candidate in remaining:
+                if len(session.exercises) >= limit:
+                    break
+
+                if candidate.pattern in used_patterns:
+                    continue
+
+                slot = _slot(
+                    muscles=[_muscle_key(candidate)],
+                    role="complementario",
+                    compound=candidate.category == "compuesto",
+                    isolation=candidate.category == "aislamiento",
+                )
+
+                if _add_exercise(
+                    session,
+                    candidate,
+                    profile,
+                    goal,
+                    slot,
+                    used_names,
+                    used_patterns,
+                ):
+                    break
+
+    weekly_sets = _calculate_volume(sessions)
+
+    program = EngineProgram(
+        program_id=program_id,
+        sessions=sessions,
+        weekly_sets=weekly_sets,
+        evidence_notes=_evidence(goal),
+    )
+
+    _validate_program(program, limit)
+
+    return program
+
+
+def proposal_to_dict(program):
+    return {
+        "program_id": program.program_id,
+        "sessions": [
+            {
+                "name": session.name,
+                "total_sets": session.total_sets,
+                "exercises": [
+                    {
+                        "exercise_id": exercise.exercise_id,
+                        "name": exercise.name,
+                        "target_muscle": exercise.target_muscle,
+                        "movement_pattern": exercise.movement_pattern,
+                        "sets": exercise.sets,
+                        "rep_min": exercise.rep_min,
+                        "rep_max": exercise.rep_max,
+                        "rir": exercise.rir,
+                        "rest_seconds": exercise.rest_seconds,
+                        "rationale": exercise.rationale,
+                    }
+                    for exercise in session.exercises
+                ],
+            }
+            for session in program.sessions
+        ],
+        "weekly_sets": program.weekly_sets,
+        "evidence_notes": program.evidence_notes,
+    }

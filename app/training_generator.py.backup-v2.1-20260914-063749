@@ -1,0 +1,420 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, asdict
+from typing import Iterable
+import random
+
+from .training_assessment import TrainingProfile, select_program
+
+
+@dataclass(frozen=True)
+class ExercisePrescription:
+    name: str
+    exercise_id: str | None
+    order: int
+    target_sets: int
+    target_rep_min: int
+    target_rep_max: int
+    target_rir: int
+    rest_seconds: int
+    is_optional: int = 0
+
+
+@dataclass(frozen=True)
+class RoutineProposal:
+    name: str
+    day_order: int
+    exercises: tuple[ExercisePrescription, ...]
+
+
+def _exercise(
+    name: str,
+    exercise_id: str | None,
+    order: int,
+    sets: int,
+    reps: tuple[int, int],
+    rir: int,
+    rest: int,
+) -> ExercisePrescription:
+    return ExercisePrescription(
+        name=name,
+        exercise_id=exercise_id,
+        order=order,
+        target_sets=sets,
+        target_rep_min=reps[0],
+        target_rep_max=reps[1],
+        target_rir=rir,
+        rest_seconds=rest,
+    )
+
+
+def _catalog_by_name(catalog: Iterable[dict]) -> dict[str, dict]:
+    return {exercise["name"]: exercise for exercise in catalog}
+
+
+def _find_exercise(
+    catalog: dict[str, dict],
+    *,
+    category: str | None = None,
+    movement_pattern: str | None = None,
+    target_muscles: tuple[str, ...] = (),
+    difficulty: str | None = None,
+    exclude: set[str] | None = None,
+) -> dict | None:
+    exclude = exclude or set()
+
+    candidates = []
+    for exercise in catalog.values():
+        if exercise["name"] in exclude:
+            continue
+        if category and exercise["category"] != category:
+            continue
+        if movement_pattern and exercise["movement_pattern"] != movement_pattern:
+            continue
+        if difficulty and exercise["difficulty"] not in (difficulty, "principiante"):
+            continue
+
+        if target_muscles:
+            target = exercise["target_muscle"].lower()
+            secondary = exercise["secondary_muscles"].lower()
+            if not any(
+                muscle.lower() in target or muscle.lower() in secondary
+                for muscle in target_muscles
+            ):
+                continue
+
+        candidates.append(exercise)
+
+    if not candidates:
+        return None
+
+    return candidates[0]
+
+
+def _pick(
+    catalog: dict[str, dict],
+    preferred_names: tuple[str, ...],
+    *,
+    exclude: set[str],
+) -> dict:
+    for name in preferred_names:
+        exercise = catalog.get(name)
+        if exercise and name not in exclude:
+            return exercise
+
+    for exercise in catalog.values():
+        if exercise["name"] not in exclude:
+            return exercise
+
+    raise ValueError("No quedan ejercicios disponibles en el catálogo")
+
+
+def _prescription(
+    exercise: dict,
+    order: int,
+    *,
+    sets: int,
+    reps: tuple[int, int],
+    rir: int,
+    rest: int,
+) -> ExercisePrescription:
+    return _exercise(
+        exercise["name"],
+        exercise.get("id"),
+        order,
+        sets,
+        reps,
+        rir,
+        rest,
+    )
+
+
+def _build_full_body(
+    catalog: dict[str, dict],
+    day_count: int,
+    profile: TrainingProfile,
+) -> list[RoutineProposal]:
+    routines = []
+
+    patterns = [
+        (
+            ("Prensa de piernas", "Hack squat", "Sentadilla goblet"),
+            ("Press banca plano", "Press banca con mancuernas"),
+            ("Jalón al pecho agarre neutro", "Jalón al pecho agarre amplio"),
+            ("Hip thrust", "Peso muerto rumano con mancuernas"),
+            ("Curl femoral", "Curl femoral sentado"),
+            ("Extensión de tríceps en polea", "Extensión de tríceps con cuerda"),
+        ),
+        (
+            ("Sentadilla goblet", "Prensa de piernas", "Hack squat"),
+            ("Press inclinado con mancuernas 30 grados", "Press inclinado en máquina"),
+            ("Remo con pecho apoyado", "Remo sentado en polea"),
+            ("Hip thrust", "Peso muerto rumano"),
+            ("Elevaciones laterales en máquina", "Elevaciones laterales con mancuernas"),
+            ("Curl de bíceps en máquina", "Curl con mancuernas"),
+        ),
+        (
+            ("Sentadilla libre", "Prensa de piernas", "Hack squat"),
+            ("Press banca con mancuernas", "Press banca plano"),
+            ("Remo en máquina", "Remo unilateral con mancuerna"),
+            ("Peso muerto rumano", "Hip thrust"),
+            ("Curl femoral tumbado", "Curl femoral sentado"),
+            ("Crunch en máquina", "Plancha"),
+        ),
+    ]
+
+    for day in range(1, day_count + 1):
+        selected: list[dict] = []
+        used: set[str] = set()
+
+        for choices in patterns[(day - 1) % len(patterns)]:
+            exercise = _pick(catalog, choices, exclude=used)
+            selected.append(exercise)
+            used.add(exercise["name"])
+
+        prescriptions = []
+        for order, exercise in enumerate(selected, start=1):
+            compound = exercise["exercise_type"] == "compuesto"
+
+            if profile.goal == "strength":
+                sets = 3 if compound else 2
+                reps = (5, 8) if compound else (8, 12)
+                rir = 2
+                rest = 150 if compound else 90
+            elif profile.goal == "glutes":
+                sets = 3 if compound else 2
+                reps = (8, 12) if compound else (10, 15)
+                rir = 2
+                rest = 120 if compound else 75
+            else:
+                sets = 3 if compound else 2
+                reps = (8, 12) if compound else (10, 15)
+                rir = 2
+                rest = 120 if compound else 75
+
+            prescriptions.append(
+                _prescription(
+                    exercise,
+                    order,
+                    sets=sets,
+                    reps=reps,
+                    rir=rir,
+                    rest=rest,
+                )
+            )
+
+        routines.append(
+            RoutineProposal(
+                name=chr(64 + day),
+                day_order=day,
+                exercises=tuple(prescriptions),
+            )
+        )
+
+    return routines
+
+
+def _build_glutes(
+    catalog: dict[str, dict],
+    day_count: int,
+    profile: TrainingProfile,
+) -> list[RoutineProposal]:
+    templates = [
+        (
+            ("Hip thrust", "Hip thrust unilateral"),
+            ("Prensa de piernas", "Prensa unilateral", "Hack squat"),
+            ("Curl femoral", "Curl femoral sentado"),
+            ("Abducción de cadera en máquina",),
+            ("Patada de glúteo en polea", "Extensión de cadera en máquina"),
+            ("Plancha", "Crunch en máquina"),
+        ),
+        (
+            ("Peso muerto rumano", "Peso muerto rumano con mancuernas"),
+            ("Sentadilla búlgara", "Step-up"),
+            ("Hip thrust", "Hip thrust unilateral"),
+            ("Curl femoral tumbado", "Curl femoral sentado"),
+            ("Abducción de cadera en máquina",),
+            ("Elevaciones de gemelos de pie", "Elevaciones de gemelos sentado"),
+        ),
+    ]
+
+    routines = []
+
+    for day in range(1, day_count + 1):
+        used: set[str] = set()
+        selected = []
+
+        for choices in templates[(day - 1) % len(templates)]:
+            exercise = _pick(catalog, choices, exclude=used)
+            selected.append(exercise)
+            used.add(exercise["name"])
+
+        prescriptions = []
+        for order, exercise in enumerate(selected, start=1):
+            compound = exercise["exercise_type"] == "compuesto"
+            sets = 3 if compound else 2
+            reps = (8, 12) if compound else (12, 15)
+            rir = 2
+            rest = 120 if compound else 75
+
+            prescriptions.append(
+                _prescription(
+                    exercise,
+                    order,
+                    sets=sets,
+                    reps=reps,
+                    rir=rir,
+                    rest=rest,
+                )
+            )
+
+        routines.append(
+            RoutineProposal(
+                name=f"Glúteos {chr(64 + day)}",
+                day_order=day,
+                exercises=tuple(prescriptions),
+            )
+        )
+
+    return routines
+
+
+def _build_upper_lower(
+    catalog: dict[str, dict],
+    profile: TrainingProfile,
+) -> list[RoutineProposal]:
+    templates = [
+        (
+            "Torso A",
+            (
+                ("Press banca plano", "Press banca con mancuernas"),
+                ("Jalón al pecho agarre neutro", "Jalón al pecho agarre amplio"),
+                ("Remo con pecho apoyado", "Remo sentado en polea"),
+                ("Press de hombro con mancuernas agarre neutro", "Press de hombros en máquina"),
+                ("Elevaciones laterales en máquina", "Elevaciones laterales con mancuernas"),
+                ("Extensión de tríceps en polea", "Extensión de tríceps con cuerda"),
+                ("Curl de bíceps en máquina", "Curl con mancuernas"),
+            ),
+        ),
+        (
+            "Pierna A",
+            (
+                ("Sentadilla libre", "Hack squat", "Prensa de piernas"),
+                ("Peso muerto rumano", "Peso muerto rumano con mancuernas"),
+                ("Curl femoral", "Curl femoral sentado"),
+                ("Extensión de cuádriceps",),
+                ("Hip thrust", "Hip thrust unilateral"),
+                ("Elevación de gemelos de pie",),
+            ),
+        ),
+        (
+            "Torso B",
+            (
+                ("Press inclinado con mancuernas 30 grados", "Press inclinado en máquina"),
+                ("Jalón al pecho agarre amplio", "Jalón unilateral en polea"),
+                ("Remo en máquina", "Remo unilateral en polea"),
+                ("Press militar con barra", "Press de hombros en máquina"),
+                ("Pájaros en máquina", "Face pull"),
+                ("Curl inclinado con mancuernas", "Curl martillo"),
+                ("Press francés", "Extensión de tríceps por encima de la cabeza"),
+            ),
+        ),
+        (
+            "Pierna B",
+            (
+                ("Sentadilla búlgara", "Prensa unilateral"),
+                ("Zancadas", "Step-up"),
+                ("Hip thrust", "Extensión de cadera en máquina"),
+                ("Curl femoral tumbado", "Curl femoral sentado"),
+                ("Extensión de cuádriceps",),
+                ("Elevación de gemelos sentado",),
+            ),
+        ),
+    ]
+
+    routines = []
+
+    for day, (name, groups) in enumerate(templates, start=1):
+        used: set[str] = set()
+        prescriptions = []
+
+        for order, choices in enumerate(groups, start=1):
+            exercise = _pick(catalog, choices, exclude=used)
+            used.add(exercise["name"])
+
+            compound = exercise["exercise_type"] == "compuesto"
+
+            if profile.goal == "strength":
+                sets = 3 if compound else 2
+                reps = (5, 8) if compound else (8, 12)
+                rir = 2
+                rest = 150 if compound else 90
+            else:
+                sets = 3 if compound else 2
+                reps = (8, 12) if compound else (10, 15)
+                rir = 2
+                rest = 120 if compound else 75
+
+            prescriptions.append(
+                _prescription(
+                    exercise,
+                    order,
+                    sets=sets,
+                    reps=reps,
+                    rir=rir,
+                    rest=rest,
+                )
+            )
+
+        routines.append(
+            RoutineProposal(
+                name=name,
+                day_order=day,
+                exercises=tuple(prescriptions),
+            )
+        )
+
+    return routines
+
+
+def generate_program(
+    profile: TrainingProfile,
+    catalog: Iterable[dict],
+) -> list[RoutineProposal]:
+    catalog_by_name = _catalog_by_name(catalog)
+
+    program_id = select_program(profile)
+
+    if program_id == "beginner_2_full_body":
+        return _build_full_body(catalog_by_name, 2, profile)
+
+    if program_id == "beginner_3_full_body":
+        return _build_full_body(catalog_by_name, 3, profile)
+
+    if program_id == "glutes_3":
+        return _build_glutes(catalog_by_name, 3, profile)
+
+    if program_id == "glutes_4":
+        return _build_glutes(catalog_by_name, 4, profile)
+
+    if program_id == "strength_3":
+        return _build_full_body(catalog_by_name, 3, profile)
+
+    if program_id == "strength_4":
+        return _build_upper_lower(catalog_by_name, profile)
+
+    if program_id == "hypertrophy_3":
+        return _build_full_body(catalog_by_name, 3, profile)
+
+    if program_id == "upper_lower_4":
+        return _build_upper_lower(catalog_by_name, profile)
+
+    raise ValueError(f"Programa no soportado: {profile.program_id}")
+
+
+def proposal_to_dict(proposal: RoutineProposal) -> dict:
+    return {
+        "name": proposal.name,
+        "day_order": proposal.day_order,
+        "exercises": [asdict(exercise) for exercise in proposal.exercises],
+    }

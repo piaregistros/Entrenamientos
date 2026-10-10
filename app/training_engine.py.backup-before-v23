@@ -1,0 +1,579 @@
+from dataclasses import dataclass, field
+
+
+MUSCLE_MAP = {
+    "Glúteo mayor": "glutes",
+    "Glúteos": "glutes",
+    "Glúteo medio": "glutes",
+    "Glúteos y cuádriceps": "quads_glutes",
+    "Cuádriceps y glúteos": "quads_glutes",
+    "Cuádriceps": "quads",
+    "Isquiosurales": "hamstrings",
+    "Isquiosurales y glúteos": "ham_glutes",
+    "Pectoral": "chest",
+    "Pectoral superior": "upper_chest",
+    "Dorsal": "back",
+    "Dorsal y espalda media": "back",
+    "Espalda media": "back",
+    "Deltoides": "delts",
+    "Deltoides lateral": "lateral_delts",
+    "Deltoides posterior": "rear_delts",
+    "Deltoides posterior y espalda alta": "rear_delts",
+    "Bíceps": "biceps",
+    "Braquial y bíceps": "biceps",
+    "Tríceps": "triceps",
+    "Gemelos": "calves",
+    "Core": "core",
+    "Recto abdominal": "core",
+}
+
+
+PATTERN_MAP = {
+    "extension_cadera": "hip_extension",
+    "bisagra_cadera": "hinge",
+    "sentadilla": "squat",
+    "zancada": "unilateral_leg",
+    "flexion_rodilla": "knee_flexion",
+    "extension_rodilla": "knee_extension",
+    "empuje_horizontal": "horizontal_push",
+    "empuje_vertical": "vertical_push",
+    "traccion_vertical": "vertical_pull",
+    "traccion_horizontal": "horizontal_pull",
+    "abduccion_hombro": "shoulder_abduction",
+    "abduccion_horizontal": "rear_delt",
+    "aduccion_hombro": "chest_isolation",
+    "flexion_codo": "elbow_flexion",
+    "extension_codo": "elbow_extension",
+    "extension_hombro": "shoulder_extension",
+    "anti_extension": "core",
+}
+
+
+@dataclass
+class Candidate:
+    id: str
+    name: str
+    muscle: str
+    pattern: str
+    category: str
+    difficulty: str
+    laterality: str
+    raw: dict
+
+
+@dataclass
+class PlannedExercise:
+    exercise_id: str
+    name: str
+    target_muscle: str
+    movement_pattern: str
+    sets: int
+    rep_min: int
+    rep_max: int
+    rir: int
+    rest_seconds: int
+    rationale: str = ""
+
+
+@dataclass
+class Session:
+    name: str
+    exercises: list[PlannedExercise] = field(default_factory=list)
+
+    @property
+    def total_sets(self):
+        return sum(exercise.sets for exercise in self.exercises)
+
+
+@dataclass
+class EngineProgram:
+    program_id: str
+    sessions: list[Session]
+    weekly_sets: dict[str, int]
+    evidence_notes: list[str] = field(default_factory=list)
+
+
+def _norm(value):
+    return str(value or "").strip().lower()
+
+
+def _profile(profile, key, default=None):
+    return getattr(profile, key, default)
+
+
+def _catalog(rows):
+    result = []
+
+    for row in rows:
+        target = str(row.get("target_muscle", ""))
+        pattern = str(row.get("movement_pattern", ""))
+
+        result.append(
+            Candidate(
+                id=str(row["id"]),
+                name=str(row["name"]),
+                muscle=MUSCLE_MAP.get(
+                    target,
+                    _norm(target),
+                ),
+                pattern=PATTERN_MAP.get(
+                    pattern,
+                    _norm(pattern),
+                ),
+                category=str(
+                    row.get("category", "")
+                ),
+                difficulty=str(
+                    row.get("difficulty", "principiante")
+                ),
+                laterality=str(
+                    row.get("laterality", "bilateral")
+                ),
+                raw=row,
+            )
+        )
+
+    return result
+
+
+def _sessions(profile):
+    days = _profile(
+        profile,
+        "days_per_week",
+        _profile(profile, "days", 3),
+    )
+
+    return max(2, min(5, int(days)))
+
+
+def _exercise_limit(profile):
+    return {
+        "30": 4,
+        "45": 5,
+        "60": 6,
+        "75": 8,
+    }.get(
+        str(_profile(profile, "duration", "60")),
+        6,
+    )
+
+
+def _targets(profile):
+    experience = _norm(
+        _profile(profile, "experience", "intermediate")
+    )
+    goal = _norm(
+        _profile(profile, "goal", "hypertrophy")
+    )
+    priority = _norm(
+        _profile(profile, "priority", "balanced")
+    )
+
+    base = 6 if experience == "beginner" else 8
+
+    if experience == "advanced":
+        base += 2
+
+    targets = {
+        "glutes": base,
+        "quads": base,
+        "hamstrings": base,
+        "chest": base,
+        "back": base + 1,
+        "delts": 5,
+        "lateral_delts": 5,
+        "rear_delts": 4,
+        "biceps": 4,
+        "triceps": 4,
+        "calves": 4,
+        "core": 2,
+    }
+
+    if goal == "strength":
+        targets = {
+            key: min(value, 8)
+            for key, value in targets.items()
+        }
+
+    if goal == "glutes" or priority == "glutes":
+        targets["glutes"] = min(14, base + 4)
+        targets["quads"] = max(6, base)
+        targets["hamstrings"] = max(6, base)
+
+    if priority == "lower":
+        for key in (
+            "glutes",
+            "quads",
+            "hamstrings",
+        ):
+            targets[key] = min(
+                14,
+                targets[key] + 2,
+            )
+
+    if priority == "upper":
+        for key in (
+            "chest",
+            "back",
+            "delts",
+            "lateral_delts",
+        ):
+            targets[key] = min(
+                14,
+                targets[key] + 2,
+            )
+
+    return targets
+
+
+def _score(
+    candidate,
+    wanted,
+    goal,
+    experience,
+    used_names,
+    used_patterns,
+):
+    score = 0
+
+    if candidate.muscle == wanted:
+        score += 100
+
+    if wanted == "glutes":
+        if candidate.muscle in {
+            "quads_glutes",
+            "ham_glutes",
+        }:
+            score += 65
+
+    if wanted == "quads":
+        if candidate.muscle == "quads_glutes":
+            score += 55
+
+    if wanted == "hamstrings":
+        if candidate.muscle == "ham_glutes":
+            score += 55
+
+    if candidate.name in used_names:
+        score -= 80
+
+    if candidate.pattern in used_patterns:
+        score -= 18
+
+    if experience == "beginner":
+        if _norm(candidate.difficulty) == "principiante":
+            score += 15
+        elif _norm(candidate.difficulty) == "intermedio":
+            score -= 10
+
+    if goal == "strength":
+        if candidate.category == "compuesto":
+            score += 18
+
+    if goal in {
+        "hypertrophy",
+        "glutes",
+    }:
+        if candidate.category == "aislamiento":
+            score += 6
+
+    if candidate.laterality == "unilateral":
+        score -= 3
+
+    return score
+
+
+def _choose(
+    candidates,
+    wanted,
+    goal,
+    experience,
+    used_names,
+    used_patterns,
+    preferred_pattern=None,
+):
+    pool = [
+        candidate
+        for candidate in candidates
+        if (
+            candidate.muscle == wanted
+            or (
+                wanted == "glutes"
+                and candidate.muscle
+                in {
+                    "quads_glutes",
+                    "ham_glutes",
+                }
+            )
+            or (
+                wanted == "quads"
+                and candidate.muscle == "quads_glutes"
+            )
+            or (
+                wanted == "hamstrings"
+                and candidate.muscle == "ham_glutes"
+            )
+        )
+    ]
+
+    if preferred_pattern:
+        preferred = [
+            candidate
+            for candidate in pool
+            if candidate.pattern == preferred_pattern
+        ]
+
+        if preferred:
+            pool = preferred
+
+    if not pool:
+        return None
+
+    return max(
+        pool,
+        key=lambda candidate: _score(
+            candidate,
+            wanted,
+            goal,
+            experience,
+            used_names,
+            used_patterns,
+        ),
+    )
+
+
+def _prescription(candidate, goal):
+    if goal == "strength":
+        if candidate.category == "compuesto":
+            return 3, 5, 8, 2, 150
+
+        return 2, 10, 15, 2, 75
+
+    if candidate.category == "compuesto":
+        return 3, 8, 12, 2, 120
+
+    return 2, 10, 15, 2, 75
+
+
+def _reason(candidate, goal, wanted):
+    if goal == "strength":
+        return (
+            f"Seleccionado para desarrollar {wanted} "
+            f"mediante el patrón {candidate.pattern}. "
+            "Los ejercicios compuestos reciben prioridad "
+            "y descansos largos para preservar el rendimiento "
+            "entre series."
+        )
+
+    return (
+        f"Seleccionado para aportar volumen al grupo "
+        f"{wanted} mediante el patrón {candidate.pattern}. "
+        "Se combina con otros patrones para distribuir "
+        "estímulo y fatiga."
+    )
+
+
+def _add(
+    session,
+    candidate,
+    goal,
+    wanted,
+    used_names,
+    used_patterns,
+):
+    if candidate is None:
+        return False
+
+    if candidate.name in used_names:
+        return False
+
+    sets, rep_min, rep_max, rir, rest = _prescription(
+        candidate,
+        goal,
+    )
+
+    session.exercises.append(
+        PlannedExercise(
+            exercise_id=candidate.id,
+            name=candidate.name,
+            target_muscle=candidate.raw.get(
+                "target_muscle",
+                "",
+            ),
+            movement_pattern=candidate.raw.get(
+                "movement_pattern",
+                "",
+            ),
+            sets=sets,
+            rep_min=rep_min,
+            rep_max=rep_max,
+            rir=rir,
+            rest_seconds=rest,
+            rationale=_reason(
+                candidate,
+                goal,
+                wanted,
+            ),
+        )
+    )
+
+    used_names.add(candidate.name)
+    used_patterns.add(candidate.pattern)
+
+    return True
+
+
+def generate_engine_program(profile, catalog):
+    candidates = _catalog(catalog)
+
+    days = _sessions(profile)
+    limit = _exercise_limit(profile)
+
+    goal = _norm(
+        _profile(profile, "goal", "hypertrophy")
+    )
+
+    experience = _norm(
+        _profile(profile, "experience", "intermediate")
+    )
+
+    priority = _norm(
+        _profile(profile, "priority", "balanced")
+    )
+
+    targets = _targets(profile)
+
+    if goal == "strength":
+        program_id = f"strength_{min(days, 4)}"
+
+    elif goal == "glutes":
+        program_id = f"glutes_{min(days, 4)}"
+
+    elif experience == "beginner":
+        program_id = (
+            f"beginner_{min(days, 3)}_full_body"
+        )
+
+    elif days >= 4:
+        program_id = "upper_lower_4"
+
+    else:
+        program_id = "hypertrophy_3"
+
+    sessions = [
+        Session(
+            f"Día {chr(65 + index)}"
+        )
+        for index in range(days)
+    ]
+
+    weekly_sets = {
+        key: 0
+        for key in targets
+    }
+
+    if goal == "strength":
+        order = [
+            "quads",
+            "hamstrings",
+            "chest",
+            "back",
+            "glutes",
+            "delts",
+            "biceps",
+            "triceps",
+        ]
+
+    elif goal == "glutes" or priority == "glutes":
+        order = [
+            "glutes",
+            "quads",
+            "hamstrings",
+            "back",
+            "chest",
+            "delts",
+            "biceps",
+            "triceps",
+            "core",
+        ]
+
+    else:
+        order = [
+            "quads",
+            "chest",
+            "back",
+            "hamstrings",
+            "glutes",
+            "delts",
+            "biceps",
+            "triceps",
+            "core",
+        ]
+
+    for session in sessions:
+        used_names = set()
+        used_patterns = set()
+
+        for wanted in order:
+            if len(session.exercises) >= limit:
+                break
+
+            if weekly_sets.get(wanted, 0) >= targets.get(
+                wanted,
+                0,
+            ):
+                continue
+
+            candidate = _choose(
+                candidates,
+                wanted,
+                goal,
+                experience,
+                used_names,
+                used_patterns,
+            )
+
+            if _add(
+                session,
+                candidate,
+                goal,
+                wanted,
+                used_names,
+                used_patterns,
+            ):
+                weekly_sets[wanted] += (
+                    session.exercises[-1].sets
+                )
+
+    evidence_notes = [
+        (
+            "El volumen se distribuye entre sesiones para "
+            "mantener la calidad del trabajo y facilitar "
+            "la recuperación."
+        ),
+        (
+            "Se utiliza normalmente 2 RIR para trabajar "
+            "cerca del fallo sin exigir fallo muscular "
+            "sistemático."
+        ),
+        (
+            "Los compuestos reciben descansos más largos "
+            "para preservar el rendimiento entre series."
+        ),
+        (
+            "La selección combina patrones y ejercicios "
+            "distintos para repartir estímulo y fatiga."
+        ),
+        (
+            "Los rangos de repeticiones se adaptan al "
+            "objetivo: más bajos para fuerza y moderados "
+            "para hipertrofia."
+        ),
+    ]
+
+    return EngineProgram(
+        program_id=program_id,
+        sessions=sessions,
+        weekly_sets=weekly_sets,
+        evidence_notes=evidence_notes,
+    )

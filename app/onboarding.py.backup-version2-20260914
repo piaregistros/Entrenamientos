@@ -1,0 +1,630 @@
+from __future__ import annotations
+
+from datetime import datetime, timezone
+import uuid
+
+
+ONBOARDING_VERSION = 1
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def create_onboarding_id() -> str:
+    return str(uuid.uuid4())
+
+
+# Programa inicial común para usuarios nuevos.
+#
+# Criterios:
+# - 3 sesiones de cuerpo completo.
+# - Prioridad adicional a glúteos y tren inferior.
+# - Volumen moderado para una persona principiante.
+# - RIR 2 en todas las series.
+# - Progresión compatible con el catálogo existente.
+#
+# El programa utiliza nombres de ejercicios y no UUIDs para que los
+# identificadores reales se resuelvan contra la tabla exercises.
+INITIAL_PROGRAM = {
+    "A": [
+        ("Hip thrust", 1, 3, 8, 10, 2, 120, 0),
+        ("Prensa de piernas", 2, 3, 8, 10, 2, 150, 0),
+        ("Press de hombro con mancuernas agarre neutro", 3, 2, 8, 10, 2, 120, 0),
+        ("Jalón al pecho agarre neutro", 4, 2, 8, 10, 2, 120, 0),
+        ("Curl femoral", 5, 2, 10, 12, 2, 90, 0),
+        ("Extensión de tríceps en polea", 6, 2, 10, 12, 2, 75, 0),
+    ],
+    "B": [
+        ("Sentadilla búlgara", 1, 3, 8, 10, 2, 120, 0),
+        ("Hip thrust", 2, 3, 8, 10, 2, 120, 0),
+        ("Press inclinado con mancuernas 30 grados", 3, 2, 8, 10, 2, 120, 0),
+        ("Remo unilateral con mancuerna", 4, 2, 10, 12, 2, 90, 0),
+        ("Elevaciones laterales en máquina", 5, 2, 12, 15, 2, 75, 0),
+        ("Curl de bíceps en máquina", 6, 2, 10, 12, 2, 75, 0),
+    ],
+    "C": [
+        ("Prensa de piernas", 1, 3, 8, 10, 2, 150, 0),
+        ("Zancadas", 2, 2, 8, 10, 2, 120, 0),
+        ("Curl femoral", 3, 2, 10, 12, 2, 90, 0),
+        ("Press banca plano", 4, 2, 8, 10, 2, 120, 0),
+        ("Remo con pecho apoyado", 5, 2, 8, 10, 2, 120, 0),
+        ("Elevaciones laterales en máquina", 6, 2, 12, 15, 2, 75, 0),
+    ],
+}
+
+
+def get_onboarding_status(conn, user_id: str) -> dict:
+    row = conn.execute(
+        """
+        SELECT
+            user_id,
+            onboarding_version,
+            completed_at
+        FROM user_onboarding
+        WHERE user_id = ?
+        """,
+        (user_id,),
+    ).fetchone()
+
+    if row is None:
+        return {
+            "required": True,
+            "completed": False,
+            "version": ONBOARDING_VERSION,
+            "completed_at": None,
+        }
+
+    completed = (
+        row["onboarding_version"] >= ONBOARDING_VERSION
+        and row["completed_at"] is not None
+    )
+
+    return {
+        "required": not completed,
+        "completed": completed,
+        "version": row["onboarding_version"],
+        "completed_at": row["completed_at"],
+    }
+
+
+def _get_user_routine_count(conn, user_id: str) -> int:
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM routines
+        WHERE user_id = ?
+        """,
+        (user_id,),
+    ).fetchone()
+
+    return int(row["count"])
+
+
+def _get_exercise_ids(conn) -> dict[str, str]:
+    rows = conn.execute(
+        """
+        SELECT id, name
+        FROM exercises
+        WHERE is_active = 1
+        """
+    ).fetchall()
+
+    return {row["name"]: row["id"] for row in rows}
+
+
+def _create_initial_program(conn, user_id: str) -> list[str]:
+    """
+    Crea el programa inicial únicamente si el usuario no tiene rutinas.
+
+    Esto hace que la operación sea idempotente:
+    - usuario nuevo -> crea A/B/C;
+    - usuario con rutinas -> no toca nada;
+    - repetir la operación -> no duplica rutinas.
+    """
+
+    if _get_user_routine_count(conn, user_id) > 0:
+        return []
+
+    exercise_ids = _get_exercise_ids(conn)
+
+    # Validamos todo el catálogo antes de insertar nada.
+    missing = sorted(
+        {
+            exercise_name
+            for routine in INITIAL_PROGRAM.values()
+            for exercise_name, *_ in routine
+            if exercise_name not in exercise_ids
+        }
+    )
+
+    if missing:
+        raise ValueError(
+            "Faltan ejercicios del catálogo para el programa inicial: "
+            + ", ".join(missing)
+        )
+
+    created_routines: list[str] = []
+
+    for day_order, routine_name in enumerate(("A", "B", "C"), start=1):
+        routine_id = str(uuid.uuid4())
+
+        conn.execute(
+            """
+            INSERT INTO routines (
+                id,
+                user_id,
+                name,
+                day_order,
+                is_active
+            )
+            VALUES (?, ?, ?, ?, 1)
+            """,
+            (
+                routine_id,
+                user_id,
+                routine_name,
+                day_order,
+            ),
+        )
+
+        for (
+            exercise_name,
+            order,
+            target_sets,
+            target_rep_min,
+            target_rep_max,
+            target_rir,
+            rest_seconds,
+            is_optional,
+        ) in INITIAL_PROGRAM[routine_name]:
+
+            conn.execute(
+                """
+                INSERT INTO routine_exercises (
+                    id,
+                    routine_id,
+                    exercise_id,
+                    "order",
+                    target_sets,
+                    target_rep_min,
+                    target_rep_max,
+                    target_rir,
+                    rest_seconds,
+                    is_optional
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(uuid.uuid4()),
+                    routine_id,
+                    exercise_ids[exercise_name],
+                    order,
+                    target_sets,
+                    target_rep_min,
+                    target_rep_max,
+                    target_rir,
+                    rest_seconds,
+                    is_optional,
+                ),
+            )
+
+        created_routines.append(routine_id)
+
+    return created_routines
+
+
+def complete_onboarding(
+    conn,
+    user_id: str,
+    profile: dict | None = None,
+) -> dict:
+    """
+    Completa el onboarding V2.
+
+    Si se proporciona un perfil, genera el programa mediante
+    training_engine y lo persiste.
+
+    La operación es idempotente:
+    - onboarding ya completado -> no modifica nada;
+    - usuario con rutinas -> no crea rutinas nuevas.
+    """
+
+    now = utc_now_iso()
+
+    existing = conn.execute(
+        """
+        SELECT onboarding_version, completed_at
+        FROM user_onboarding
+        WHERE user_id = ?
+        """,
+        (user_id,),
+    ).fetchone()
+
+    if (
+        existing is not None
+        and existing["onboarding_version"] >= ONBOARDING_VERSION
+        and existing["completed_at"] is not None
+    ):
+        return get_onboarding_status(conn, user_id)
+
+    if profile is not None:
+        _create_engine_program(
+            conn,
+            user_id,
+            profile,
+        )
+
+    conn.execute(
+        """
+        INSERT INTO user_onboarding (
+            id,
+            user_id,
+            onboarding_version,
+            completed_at,
+            created_at,
+            updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(user_id)
+        DO UPDATE SET
+            onboarding_version = excluded.onboarding_version,
+            completed_at = excluded.completed_at,
+            updated_at = excluded.updated_at
+        """,
+        (
+            create_onboarding_id(),
+            user_id,
+            ONBOARDING_VERSION,
+            now,
+            now,
+            now,
+        ),
+    )
+
+    conn.commit()
+
+    return get_onboarding_status(
+        conn,
+        user_id,
+    )
+
+
+def reset_onboarding(conn, user_id: str) -> dict:
+    """
+    Reinicia solamente el estado del onboarding.
+
+    No elimina las rutinas del usuario.
+    """
+
+    conn.execute(
+        """
+        DELETE FROM user_onboarding
+        WHERE user_id = ?
+        """,
+        (user_id,),
+    )
+
+    conn.commit()
+
+    return get_onboarding_status(conn, user_id)
+
+
+# ============================================================
+# TRAINING ASSESSMENT V2
+# ============================================================
+
+import json
+
+from .training_assessment import (
+    ASSESSMENT_VERSION,
+    build_training_profile,
+    select_program,
+    explain_selection,
+)
+
+from .training_engine import (
+    generate_engine_program,
+)
+
+
+
+def _get_active_exercise_catalog(conn) -> list[dict]:
+    """
+    Devuelve el catálogo activo en el formato que espera el motor.
+    """
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM exercises
+        WHERE is_active = 1
+        ORDER BY name
+        """
+    ).fetchall()
+
+    return [dict(row) for row in rows]
+
+
+def _create_engine_program(
+    conn,
+    user_id: str,
+    profile: dict,
+) -> list[str]:
+    """
+    Genera y persiste el programa V2.
+
+    Seguridad:
+    - Si el usuario ya tiene rutinas, no toca nada.
+    - La generación se realiza antes de insertar.
+    - Si falta algún ejercicio, falla toda la operación.
+    """
+
+    if _get_user_routine_count(conn, user_id) > 0:
+        return []
+
+    catalog = _get_active_exercise_catalog(conn)
+
+    if not catalog:
+        raise ValueError(
+            "El catálogo de ejercicios está vacío."
+        )
+
+    program = generate_engine_program(
+        profile,
+        catalog,
+    )
+
+    if not program.sessions:
+        raise ValueError(
+            "El motor no ha podido generar ninguna sesión."
+        )
+
+    exercise_ids = _get_exercise_ids(conn)
+
+    created_routines: list[str] = []
+
+    for day_order, session in enumerate(
+        program.sessions,
+        start=1,
+    ):
+        routine_id = str(uuid.uuid4())
+
+        # El nombre visible será A, B, C...
+        routine_name = chr(64 + day_order)
+
+        conn.execute(
+            """
+            INSERT INTO routines (
+                id,
+                user_id,
+                name,
+                day_order,
+                is_active
+            )
+            VALUES (?, ?, ?, ?, 1)
+            """,
+            (
+                routine_id,
+                user_id,
+                routine_name,
+                day_order,
+            ),
+        )
+
+        for order, exercise in enumerate(
+            session.exercises,
+            start=1,
+        ):
+            exercise_id = exercise_ids.get(
+                exercise.exercise_name
+            )
+
+            if exercise_id is None:
+                raise ValueError(
+                    "El motor ha seleccionado un ejercicio "
+                    f"que no existe en el catálogo: "
+                    f"{exercise.exercise_name}"
+                )
+
+            conn.execute(
+                """
+                INSERT INTO routine_exercises (
+                    id,
+                    routine_id,
+                    exercise_id,
+                    "order",
+                    target_sets,
+                    target_rep_min,
+                    target_rep_max,
+                    target_rir,
+                    rest_seconds,
+                    is_optional
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(uuid.uuid4()),
+                    routine_id,
+                    exercise_id,
+                    order,
+                    exercise.target_sets,
+                    exercise.rep_min,
+                    exercise.rep_max,
+                    exercise.rir,
+                    exercise.rest_seconds,
+                    0,
+                ),
+            )
+
+        created_routines.append(routine_id)
+
+    return created_routines
+
+
+def save_training_profile(
+    conn,
+    user_id: str,
+    answers: dict[str, str],
+) -> dict:
+    """
+    Guarda o actualiza el perfil de entrenamiento generado
+    por el cuestionario inicial.
+    """
+
+    profile = build_training_profile(answers)
+    program_id = select_program(profile)
+
+    now = utc_now_iso()
+    profile_id = create_onboarding_id()
+
+    answers_json = json.dumps(
+        answers,
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+    existing = conn.execute(
+        """
+        SELECT id
+        FROM user_training_profiles
+        WHERE user_id = ?
+        """,
+        (user_id,),
+    ).fetchone()
+
+    if existing:
+        conn.execute(
+            """
+            UPDATE user_training_profiles
+            SET
+                assessment_version = ?,
+                goal = ?,
+                experience = ?,
+                days_per_week = ?,
+                duration = ?,
+                priority = ?,
+                style = ?,
+                answers_json = ?,
+                program_id = ?,
+                updated_at = ?
+            WHERE user_id = ?
+            """,
+            (
+                ASSESSMENT_VERSION,
+                profile.goal,
+                profile.experience,
+                profile.days_per_week,
+                profile.duration,
+                profile.priority,
+                profile.style,
+                answers_json,
+                program_id,
+                now,
+                user_id,
+            ),
+        )
+
+        profile_id = existing["id"]
+
+    else:
+        conn.execute(
+            """
+            INSERT INTO user_training_profiles (
+                id,
+                user_id,
+                assessment_version,
+                goal,
+                experience,
+                days_per_week,
+                duration,
+                priority,
+                style,
+                answers_json,
+                program_id,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                profile_id,
+                user_id,
+                ASSESSMENT_VERSION,
+                profile.goal,
+                profile.experience,
+                profile.days_per_week,
+                profile.duration,
+                profile.priority,
+                profile.style,
+                answers_json,
+                program_id,
+                now,
+                now,
+            ),
+        )
+
+    return {
+        "id": profile_id,
+        "user_id": user_id,
+        "assessment_version": ASSESSMENT_VERSION,
+        "goal": profile.goal,
+        "experience": profile.experience,
+        "days_per_week": profile.days_per_week,
+        "duration": profile.duration,
+        "priority": profile.priority,
+        "style": profile.style,
+        "answers": answers,
+        "program_id": program_id,
+        "program_explanation": explain_selection(
+            profile,
+            program_id,
+        ),
+    }
+
+
+def get_training_profile(conn, user_id: str) -> dict | None:
+    row = conn.execute(
+        """
+        SELECT
+            id,
+            user_id,
+            assessment_version,
+            goal,
+            experience,
+            days_per_week,
+            duration,
+            priority,
+            style,
+            answers_json,
+            program_id,
+            created_at,
+            updated_at
+        FROM user_training_profiles
+        WHERE user_id = ?
+        """,
+        (user_id,),
+    ).fetchone()
+
+    if row is None:
+        return None
+
+    try:
+        answers = json.loads(row["answers_json"])
+    except (TypeError, ValueError, json.JSONDecodeError):
+        answers = {}
+
+    return {
+        "id": row["id"],
+        "user_id": row["user_id"],
+        "assessment_version": row["assessment_version"],
+        "goal": row["goal"],
+        "experience": row["experience"],
+        "days_per_week": row["days_per_week"],
+        "duration": row["duration"],
+        "priority": row["priority"],
+        "style": row["style"],
+        "answers": answers,
+        "program_id": row["program_id"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }

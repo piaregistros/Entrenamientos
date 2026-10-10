@@ -1,0 +1,517 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+from app.training_assessment import TrainingProfile, select_program
+
+
+@dataclass
+class ExercisePrescription:
+    exercise_id: str
+    name: str
+    order: int
+    target_sets: int
+    target_rep_min: int
+    target_rep_max: int
+    target_rir: int
+    rest_seconds: int
+
+
+@dataclass
+class RoutineProposal:
+    name: str
+    day_number: int
+    exercises: list[ExercisePrescription]
+
+
+def _catalog_by_name(catalog: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {str(x["name"]).strip().lower(): x for x in catalog}
+
+
+def _pick(
+    catalog: dict[str, dict[str, Any]],
+    preferred: list[str],
+    used: set[str],
+    *,
+    allow_used: bool = False,
+) -> dict[str, Any]:
+    for name in preferred:
+        item = catalog.get(name.strip().lower())
+        if item is None:
+            continue
+        key = str(item["id"])
+        if allow_used or key not in used:
+            used.add(key)
+            return item
+
+    # Fallback: primer ejercicio disponible no utilizado.
+    for item in catalog.values():
+        key = str(item["id"])
+        if allow_used or key not in used:
+            used.add(key)
+            return item
+
+    raise ValueError("No quedan ejercicios disponibles para generar la rutina")
+
+
+def _prescription(
+    item: dict[str, Any],
+    order: int,
+    *,
+    sets: int,
+    rep_min: int,
+    rep_max: int,
+    rir: int = 2,
+    rest: int = 120,
+) -> ExercisePrescription:
+    return ExercisePrescription(
+        exercise_id=str(item["id"]),
+        name=str(item["name"]),
+        order=order,
+        target_sets=sets,
+        target_rep_min=rep_min,
+        target_rep_max=rep_max,
+        target_rir=rir,
+        rest_seconds=rest,
+    )
+
+
+def _add(
+    exercises: list[ExercisePrescription],
+    item: dict[str, Any],
+    *,
+    sets: int,
+    rep_min: int,
+    rep_max: int,
+    rir: int = 2,
+    rest: int = 120,
+) -> None:
+    exercises.append(
+        _prescription(
+            item,
+            len(exercises) + 1,
+            sets=sets,
+            rep_min=rep_min,
+            rep_max=rep_max,
+            rir=rir,
+            rest=rest,
+        )
+    )
+
+
+def _compound(
+    exercises: list[ExercisePrescription],
+    item: dict[str, Any],
+    *,
+    sets: int = 3,
+    rep_min: int = 8,
+    rep_max: int = 12,
+    rir: int = 2,
+    rest: int = 120,
+) -> None:
+    _add(
+        exercises,
+        item,
+        sets=sets,
+        rep_min=rep_min,
+        rep_max=rep_max,
+        rir=rir,
+        rest=rest,
+    )
+
+
+def _isolation(
+    exercises: list[ExercisePrescription],
+    item: dict[str, Any],
+    *,
+    sets: int = 2,
+    rep_min: int = 10,
+    rep_max: int = 15,
+    rir: int = 2,
+    rest: int = 75,
+) -> None:
+    _add(
+        exercises,
+        item,
+        sets=sets,
+        rep_min=rep_min,
+        rep_max=rep_max,
+        rir=rir,
+        rest=rest,
+    )
+
+
+def _core(
+    exercises: list[ExercisePrescription],
+    item: dict[str, Any],
+    *,
+    sets: int = 2,
+    rep_min: int = 8,
+    rep_max: int = 15,
+    rir: int = 2,
+    rest: int = 60,
+) -> None:
+    _add(
+        exercises,
+        item,
+        sets=sets,
+        rep_min=rep_min,
+        rep_max=rep_max,
+        rir=rir,
+        rest=rest,
+    )
+
+
+def _build_full_body(
+    catalog: dict[str, dict[str, Any]],
+    day: int,
+    *,
+    used_week: set[str],
+    beginner: bool = False,
+) -> RoutineProposal:
+    used = set()
+
+    if day == 1:
+        lower = _pick(
+            catalog,
+            ["prensa de piernas", "hack squat", "sentadilla goblet"],
+            used,
+        )
+        push = _pick(
+            catalog,
+            ["press banca plano", "press banca con mancuernas", "press convergente de pecho"],
+            used,
+        )
+        pull = _pick(
+            catalog,
+            ["jalón al pecho agarre neutro", "remo sentado en polea", "remo en máquina"],
+            used,
+        )
+        hip = _pick(
+            catalog,
+            ["hip thrust", "peso muerto rumano", "peso muerto rumano con mancuernas"],
+            used,
+        )
+        iso1 = _pick(catalog, ["curl femoral", "curl femoral sentado", "curl femoral tumbado"], used)
+        iso2 = _pick(catalog, ["extensión de tríceps en polea", "extensión de tríceps con cuerda"], used)
+    else:
+        lower = _pick(
+            catalog,
+            ["sentadilla goblet", "sentadilla libre", "hack squat", "prensa de piernas"],
+            used,
+        )
+        push = _pick(
+            catalog,
+            ["press inclinado con mancuernas 30 grados", "press inclinado en máquina", "press banca con mancuernas"],
+            used,
+        )
+        pull = _pick(
+            catalog,
+            ["remo con pecho apoyado", "remo en máquina", "remo sentado en polea"],
+            used,
+        )
+        hip = _pick(
+            catalog,
+            ["peso muerto rumano", "hip thrust", "peso muerto rumano con mancuernas"],
+            used,
+        )
+        iso1 = _pick(
+            catalog,
+            ["elevaciones laterales en máquina", "elevaciones laterales con mancuernas", "elevaciones laterales en polea"],
+            used,
+        )
+        iso2 = _pick(
+            catalog,
+            ["curl de bíceps en máquina", "curl con mancuernas", "curl martillo"],
+            used,
+        )
+
+    exercises: list[ExercisePrescription] = []
+
+    _compound(exercises, lower, sets=3)
+    _compound(exercises, push, sets=3)
+    _compound(exercises, pull, sets=3)
+    _compound(exercises, hip, sets=3)
+    _isolation(exercises, iso1)
+    _isolation(exercises, iso2)
+
+    return RoutineProposal(
+        name=chr(64 + day),
+        day_number=day,
+        exercises=exercises,
+    )
+
+
+def _build_glutes(
+    catalog: dict[str, dict[str, Any]],
+    day: int,
+    *,
+    used_week: set[str],
+) -> RoutineProposal:
+    used = set()
+
+    templates = {
+        1: (
+            ["hip thrust", "hip thrust unilateral"],
+            ["prensa de piernas", "hack squat"],
+            ["curl femoral", "curl femoral sentado", "curl femoral tumbado"],
+            ["abducción de cadera en máquina"],
+            ["patada de glúteo en polea", "extensión de cadera en máquina"],
+            ["crunch en máquina", "crunch en polea"],
+        ),
+        2: (
+            ["peso muerto rumano", "peso muerto rumano con mancuernas"],
+            ["sentadilla búlgara", "step-up"],
+            ["hip thrust", "prensa de piernas"],
+            ["curl femoral tumbado", "curl femoral sentado"],
+            ["abducción de cadera en máquina"],
+            ["press banca plano", "press banca con mancuernas"],
+        ),
+        3: (
+            ["hip thrust unilateral", "extensión de cadera en máquina", "hip thrust"],
+            ["zancadas", "step-up", "prensa unilateral"],
+            ["peso muerto rumano con mancuernas", "peso muerto rumano"],
+            ["curl femoral sentado", "curl femoral tumbado"],
+            ["abducción de cadera en máquina"],
+            ["pallof press", "crunch en polea", "elevación de rodillas"],
+        ),
+        4: (
+            ["hip thrust", "hip thrust unilateral"],
+            ["prensa unilateral", "prensa de piernas"],
+            ["sentadilla búlgara", "step-up", "zancadas"],
+            ["extensión de cadera en máquina", "patada de glúteo en polea"],
+            ["abducción de cadera en máquina"],
+            ["pallof press", "crunch en máquina"],
+        ),
+    }
+
+    template = templates[((day - 1) % 4) + 1]
+
+    exercises: list[ExercisePrescription] = []
+
+    first = _pick(catalog, template[0], used)
+    second = _pick(catalog, template[1], used)
+    third = _pick(catalog, template[2], used)
+    fourth = _pick(catalog, template[3], used)
+    fifth = _pick(catalog, template[4], used)
+    sixth = _pick(catalog, template[5], used)
+
+    _compound(exercises, first, sets=3)
+    _compound(exercises, second, sets=3)
+    _compound(exercises, third, sets=2)
+    _isolation(exercises, fourth, sets=2, rep_min=12, rep_max=15)
+    _isolation(exercises, fifth, sets=2, rep_min=12, rep_max=15)
+    _core(exercises, sixth)
+
+    return RoutineProposal(
+        name=f"Glúteos {chr(64 + day)}",
+        day_number=day,
+        exercises=exercises,
+    )
+
+
+def _build_upper_lower(
+    catalog: dict[str, dict[str, Any]],
+    day: int,
+    *,
+    used_week: set[str],
+    strength: bool = False,
+) -> RoutineProposal:
+    used = set()
+    exercises: list[ExercisePrescription] = []
+
+    if day in (1, 3):
+        # TORso: equilibrio deliberado entre empuje y tracción.
+        if day == 1:
+            push1 = _pick(catalog, ["press banca plano", "press banca con mancuernas"], used)
+            pull1 = _pick(catalog, ["jalón al pecho agarre neutro", "jalón al pecho agarre amplio"], used)
+            pull2 = _pick(catalog, ["remo con pecho apoyado", "remo en máquina"], used)
+            push2 = _pick(catalog, ["press de hombros en máquina", "press de hombro con mancuernas agarre neutro"], used)
+            lat = _pick(catalog, ["elevaciones laterales en máquina", "elevaciones laterales con mancuernas"], used)
+            arm1 = _pick(catalog, ["extensión de tríceps en polea", "extensión de tríceps con cuerda"], used)
+            arm2 = _pick(catalog, ["curl de bíceps en máquina", "curl martillo"], used)
+        else:
+            push1 = _pick(catalog, ["press inclinado con mancuernas 30 grados", "press inclinado en máquina"], used)
+            pull1 = _pick(catalog, ["jalón al pecho agarre amplio", "jalón unilateral en polea"], used)
+            pull2 = _pick(catalog, ["remo en máquina", "remo unilateral en polea"], used)
+            push2 = _pick(catalog, ["press militar con barra", "press de hombros en máquina"], used)
+            lat = _pick(catalog, ["pájaros en máquina", "elevaciones laterales en polea"], used)
+            arm1 = _pick(catalog, ["press francés", "extensión de tríceps por encima de la cabeza"], used)
+            arm2 = _pick(catalog, ["curl inclinado con mancuernas", "curl con mancuernas"], used)
+
+        if strength:
+            _compound(exercises, push1, sets=3, rep_min=5, rep_max=8, rest=150)
+            _compound(exercises, pull1, sets=3, rep_min=5, rep_max=8, rest=150)
+            _compound(exercises, pull2, sets=3, rep_min=5, rep_max=8, rest=150)
+            _compound(exercises, push2, sets=2, rep_min=6, rep_max=10, rest=120)
+        else:
+            _compound(exercises, push1)
+            _compound(exercises, pull1)
+            _compound(exercises, pull2)
+            _compound(exercises, push2)
+
+        _isolation(exercises, lat)
+        _isolation(exercises, arm1)
+        _isolation(exercises, arm2)
+
+        return RoutineProposal(
+            name=f"Torso {'A' if day == 1 else 'B'}",
+            day_number=day,
+            exercises=exercises,
+        )
+
+    # PIERNAS
+    # Ambas sesiones cubren dominante de rodilla, bisagra de cadera,
+    # extensión de cadera, flexión de rodilla, cuádriceps y gemelos.
+
+    if day == 2:
+        squat = _pick(catalog, ["sentadilla libre", "hack squat", "prensa de piernas"], used)
+        hinge = _pick(catalog, ["peso muerto rumano", "peso muerto rumano con mancuernas"], used)
+        hip = _pick(catalog, ["hip thrust", "extensión de cadera en máquina"], used)
+        ham = _pick(catalog, ["curl femoral", "curl femoral sentado"], used)
+        quad = _pick(catalog, ["extensión de cuádriceps"], used)
+        calf = _pick(catalog, ["elevación de gemelos de pie", "elevación de gemelos sentado"], used)
+    else:
+        squat = _pick(catalog, ["prensa de piernas", "hack squat", "sentadilla libre"], used)
+        hinge = _pick(catalog, ["peso muerto rumano con mancuernas", "peso muerto rumano"], used)
+        hip = _pick(catalog, ["hip thrust unilateral", "extensión de cadera en máquina", "hip thrust"], used)
+        ham = _pick(catalog, ["curl femoral tumbado", "curl femoral sentado"], used)
+        quad = _pick(catalog, ["extensión de cuádriceps"], used)
+        calf = _pick(catalog, ["elevación de gemelos sentado", "elevación de gemelos de pie"], used)
+
+    if strength:
+        _compound(exercises, squat, sets=3, rep_min=5, rep_max=8, rest=150)
+        _compound(exercises, hinge, sets=3 if day == 2 else 2, rep_min=5, rep_max=8, rest=150)
+        _compound(exercises, hip, sets=2, rep_min=6, rep_max=10, rest=120)
+    else:
+        _compound(exercises, squat)
+        _compound(exercises, hinge)
+        _compound(exercises, hip, sets=2)
+
+    _isolation(exercises, ham)
+    _isolation(exercises, quad)
+    _isolation(exercises, calf)
+
+    return RoutineProposal(
+        name=f"Pierna {chr(65 + (0 if day == 2 else 1))}",
+        day_number=day,
+        exercises=exercises,
+    )
+
+
+def generate_program(
+    profile: TrainingProfile,
+    catalog: list[dict[str, Any]],
+) -> list[RoutineProposal]:
+    program_id = select_program(profile)
+    by_name = _catalog_by_name(catalog)
+
+    program: list[RoutineProposal] = []
+    used_week: set[str] = set()
+
+    if program_id == "beginner_2_full_body":
+        for day in range(1, 3):
+            routine = _build_full_body(
+                by_name,
+                day,
+                used_week=used_week,
+                beginner=True,
+            )
+            program.append(routine)
+
+    elif program_id == "beginner_3_full_body":
+        for day in range(1, 4):
+            routine = _build_full_body(
+                by_name,
+                day,
+                used_week=used_week,
+                beginner=True,
+            )
+            program.append(routine)
+
+    elif program_id == "hypertrophy_3":
+        for day in range(1, 4):
+            routine = _build_full_body(
+                by_name,
+                day,
+                used_week=used_week,
+            )
+            program.append(routine)
+
+    elif program_id == "glutes_3":
+        for day in range(1, 4):
+            program.append(
+                _build_glutes(
+                    by_name,
+                    day,
+                    used_week=used_week,
+                )
+            )
+
+    elif program_id == "glutes_4":
+        for day in range(1, 5):
+            program.append(
+                _build_glutes(
+                    by_name,
+                    day,
+                    used_week=used_week,
+                )
+            )
+
+    elif program_id == "strength_3":
+        for day in range(1, 4):
+            program.append(
+                _build_upper_lower(
+                    by_name,
+                    day if day <= 2 else 1,
+                    used_week=used_week,
+                    strength=True,
+                )
+            )
+
+    elif program_id == "strength_4":
+        for day in range(1, 5):
+            program.append(
+                _build_upper_lower(
+                    by_name,
+                    day,
+                    used_week=used_week,
+                    strength=True,
+                )
+            )
+
+    elif program_id == "upper_lower_4":
+        for day in range(1, 5):
+            program.append(
+                _build_upper_lower(
+                    by_name,
+                    day,
+                    used_week=used_week,
+                )
+            )
+
+    else:
+        raise ValueError(f"Programa no soportado: {program_id}")
+
+    return program
+
+
+def proposal_to_dict(routine: RoutineProposal) -> dict[str, Any]:
+    return {
+        "name": routine.name,
+        "day_number": routine.day_number,
+        "exercises": [
+            {
+                "exercise_id": e.exercise_id,
+                "name": e.name,
+                "order": e.order,
+                "target_sets": e.target_sets,
+                "target_rep_min": e.target_rep_min,
+                "target_rep_max": e.target_rep_max,
+                "target_rir": e.target_rir,
+                "rest_seconds": e.rest_seconds,
+            }
+            for e in routine.exercises
+        ],
+    }

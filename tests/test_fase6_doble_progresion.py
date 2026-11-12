@@ -538,3 +538,16 @@ def test_la_antigua_regla_no_sube_peso_si_solo_se_llego_al_minimo(client):
     _complete(client, [(LEG_PRESS_ID, 100, 8, 2)] * 3)       # rango 8-10: solo mínimo
     p = _progress()[LEG_PRESS_ID]
     assert p["next_weight_kg"] == 100 and p["kind"] == "add_reps" and p["next_reps"] == 9
+
+
+def test_fecha_ilegible_no_hace_perder_la_progresion(client):
+    init_progress_db()
+    wid = _complete(client, [(LEG_PRESS_ID, 100, 10, 2)] * 3)
+    conn = get_connection()
+    try:
+        conn.execute("UPDATE workout_logs SET date = 'fecha rara' WHERE id = ?", (wid,))
+        recompute_exercise_progress(conn, PABLO_ID, {LEG_PRESS_ID})
+        conn.commit()
+    finally:
+        conn.close()
+    assert _progress()[LEG_PRESS_ID]["next_weight_kg"] == 105

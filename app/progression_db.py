@@ -146,8 +146,12 @@ def load_recent_sessions(conn, user_id: str, exercise_id: str, until_workout_id=
     params: list = [user_id, exercise_id]
     until_sql = ""
     if until_workout_id:
-        target = conn.execute("SELECT date FROM workout_logs WHERE id=?", (until_workout_id,)).fetchone()
-        if target:
+        target = conn.execute(
+            "SELECT date, datetime(date) AS parsed FROM workout_logs WHERE id=?", (until_workout_id,)
+        ).fetchone()
+        # Si SQLite no sabe interpretar la fecha (formato raro), no se filtra por fecha: mejor ver
+        # todo el historial que perder la progresión en silencio.
+        if target and target["parsed"] is not None:
             until_sql = (
                 " AND (datetime(wl.date) < datetime(?) OR (datetime(wl.date) = datetime(?) AND wl.id <= ?))"
             )

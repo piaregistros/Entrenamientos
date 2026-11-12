@@ -244,6 +244,23 @@ def test_no_se_puede_sustituir_por_un_ejercicio_inactivo_ni_por_uno_de_la_misma_
     assert substitute(client, w["id"], BENCH_ID, BENCH_ID).status_code == 400
 
 
+def test_se_puede_cambiar_de_sustituto_hasta_registrar_series(client):
+    w = start_workout(client)
+    assert substitute(client, w["id"], BENCH_ID, SHOULDER_ID).status_code == 200
+    # cambiar de opinión sin series registradas: reemplaza
+    r = substitute(client, w["id"], BENCH_ID, INCLINE_ID)
+    assert r.status_code == 200 and r.json()["substitute_exercise"]["id"] == INCLINE_ID
+    got = client.get(f"/api/workouts/{w['id']}", params={"user_id": PABLO_ID}).json()
+    assert [s["substitute_exercise_id"] for s in got["substitutions"]] == [INCLINE_ID]
+    # el mismo otra vez: 409 (como antes)
+    assert substitute(client, w["id"], BENCH_ID, INCLINE_ID).status_code == 409
+    # con series registradas ya no se puede cambiar
+    log_sets(client, w["id"], INCLINE_ID, 20, 8, n=1)
+    assert substitute(client, w["id"], BENCH_ID, SHOULDER_ID).status_code == 409
+    # y un mismo sustituto no puede ocupar dos huecos
+    assert substitute(client, w["id"], EXERCISES["biceps"][0], INCLINE_ID).status_code == 409
+
+
 # ====================================================== preferencias del usuario
 def test_la_eleccion_habitual_sale_primero_marcada_y_solo_para_ese_usuario(client, cat):
     w = start_workout(client)

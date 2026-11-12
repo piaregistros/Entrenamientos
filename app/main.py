@@ -3760,7 +3760,7 @@ def substitute_workout_exercise(
     # -----------------------------------------------------
 
     existing = conn.execute("""
-        SELECT id
+        SELECT id, substitute_exercise_id
         FROM workout_exercise_substitutions
         WHERE workout_log_id = ?
           AND original_exercise_id = ?
@@ -3769,37 +3769,68 @@ def substitute_workout_exercise(
         data.original_exercise_id,
     )).fetchone()
 
-    if existing:
+    # Fase 7: el sustituto tampoco puede estar ya haciendo de sustituto de otro hueco.
+    used_elsewhere = conn.execute("""
+        SELECT 1 FROM workout_exercise_substitutions
+        WHERE workout_log_id = ? AND substitute_exercise_id = ? AND original_exercise_id <> ?
+    """, (workout_id, data.substitute_exercise_id, data.original_exercise_id)).fetchone()
+    if used_elsewhere:
+        conn.close()
+        raise HTTPException(
+            status_code=409,
+            detail="Ese ejercicio ya sustituye a otro de esta sesión"
+        )
+
+    if existing and existing["substitute_exercise_id"] == data.substitute_exercise_id:
         conn.close()
         raise HTTPException(
             status_code=409,
             detail="Este ejercicio ya ha sido sustituido en esta sesión"
         )
 
+    if existing:
+        # Cambiar de opinión: se puede cambiar de sustituto mientras no haya series registradas con él.
+        logged = conn.execute(
+            "SELECT COUNT(*) FROM workout_sets WHERE workout_log_id = ? AND exercise_id = ?",
+            (workout_id, existing["substitute_exercise_id"]),
+        ).fetchone()[0]
+        if logged:
+            conn.close()
+            raise HTTPException(
+                status_code=409,
+                detail="Este ejercicio ya ha sido sustituido en esta sesión y tiene series registradas"
+            )
+
     # -----------------------------------------------------
     # Registrar la sustitución
     # -----------------------------------------------------
 
-    substitution_id = str(uuid.uuid4())
-
     reason = data.reason or substitution["reason"]
 
-    conn.execute("""
-        INSERT INTO workout_exercise_substitutions (
-            id,
-            workout_log_id,
-            original_exercise_id,
-            substitute_exercise_id,
-            reason
+    if existing:
+        substitution_id = existing["id"]
+        conn.execute(
+            "UPDATE workout_exercise_substitutions SET substitute_exercise_id = ?, reason = ? WHERE id = ?",
+            (data.substitute_exercise_id, reason, substitution_id),
         )
-        VALUES (?, ?, ?, ?, ?)
-    """, (
-        substitution_id,
-        workout_id,
-        data.original_exercise_id,
-        data.substitute_exercise_id,
-        reason,
-    ))
+    else:
+        substitution_id = str(uuid.uuid4())
+        conn.execute("""
+            INSERT INTO workout_exercise_substitutions (
+                id,
+                workout_log_id,
+                original_exercise_id,
+                substitute_exercise_id,
+                reason
+            )
+            VALUES (?, ?, ?, ?, ?)
+        """, (
+            substitution_id,
+            workout_id,
+            data.original_exercise_id,
+            data.substitute_exercise_id,
+            reason,
+        ))
 
     # Fase 7: recordar la elección (y, si se pide, fijarla para esta rutina).
     record_substitution_pref(

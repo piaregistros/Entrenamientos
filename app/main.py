@@ -12,6 +12,7 @@ from .activity_routes import router as activity_router, init_activity_db
 from .diet_routes import router as diet_router, init_diet_db
 from .progress_routes import router as progress_router, init_progress_db, apply_progression
 from .onboarding_routes import router as onboarding_router
+from .workout_extras import router as workout_extras_router, load_extra_exercises, load_substitutions
 from .auth import (
     get_authenticated_user,
     require_admin,
@@ -37,6 +38,7 @@ app.include_router(activity_router)
 app.include_router(diet_router)
 app.include_router(progress_router)
 app.include_router(onboarding_router)
+app.include_router(workout_extras_router)
 
 app.add_api_route(
     "/api/workouts/in-progress",
@@ -4785,6 +4787,11 @@ def get_workout(
 
     result_sets = [dict(row) for row in sets]
 
+    # Ejercicios extra y sustituciones de la sesión: sin esto, al recargar o
+    # salir y continuar la lista se reconstruía solo desde la rutina.
+    extra_exercises = load_extra_exercises(conn, workout_id)
+    substitutions = load_substitutions(conn, workout_id)
+
     conn.close()
 
     return {
@@ -4798,6 +4805,8 @@ def get_workout(
         "status": workout["status"],
         "current_exercise_id": workout["current_exercise_id"],
         "sets": result_sets,
+        "extra_exercises": extra_exercises,
+        "substitutions": substitutions,
     }
 
 @app.put("/api/workouts/{workout_id}")

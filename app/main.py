@@ -86,9 +86,17 @@ async def csrf_protection_middleware(request, call_next):
 
 @app.on_event("startup")
 def startup():
+    # Todo el DDL / migraciones se hace UNA vez aquí, nunca en peticiones GET
+    # (evita "database is locked" al cargar el Inicio con varias peticiones).
     init_db()
     init_activity_db()
     init_diet_db()
+    init_progress_db()
+    conn = get_connection()
+    try:
+        _ensure_session_label(conn)
+    finally:
+        conn.close()
 
 
 @app.get("/api/health")
@@ -130,7 +138,6 @@ def get_routines(
     target_user_id = resolve_target_user(current_user, user_id)
 
     conn = get_connection()
-    _ensure_session_label(conn)
 
     rows = conn.execute(
         """
@@ -228,7 +235,6 @@ def routine_overlap(
     current_user = Depends(get_authenticated_user),
 ):
     conn = get_connection()
-    _ensure_session_label(conn)
     routine = conn.execute(
         "SELECT id, user_id, name FROM routines WHERE id = ?",
         (routine_id,),
@@ -4964,10 +4970,6 @@ def create_exercise(body: ExerciseCreateIn, current_user=Depends(get_authenticat
     if len(name) < 2:
         raise HTTPException(status_code=400, detail="Nombre demasiado corto")
     conn = get_connection()
-    cols = {row["name"] for row in conn.execute("PRAGMA table_info(exercises)")}
-    for col in ("steps", "technical_cues", "common_mistakes", "video_url"):
-        if col not in cols:
-            conn.execute(f"ALTER TABLE exercises ADD COLUMN {col} TEXT")
     existing = conn.execute("SELECT id FROM exercises WHERE lower(name)=lower(?)", (name,)).fetchone()
     if existing:
         conn.close()

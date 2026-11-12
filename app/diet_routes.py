@@ -131,7 +131,6 @@ def _store_week(conn, user_id: str, week: dict) -> None:
 
 @router.get("/goals")
 def list_goals(current_user=Depends(get_authenticated_user)):
-    init_diet_db()
     return {"goals": list(GOALS.values()), "forbidden": ["cerdo", "marisco"]}
 
 
@@ -151,7 +150,6 @@ def get_recipe(recipe_id: str, current_user=Depends(get_authenticated_user)):
 
 @router.get("/profile")
 def get_profile(current_user=Depends(get_authenticated_user)):
-    init_diet_db()
     conn = get_connection()
     try:
         return _profile_row(conn, current_user["id"])
@@ -161,7 +159,6 @@ def get_profile(current_user=Depends(get_authenticated_user)):
 
 @router.put("/profile")
 def put_profile(body: DietProfileIn, current_user=Depends(get_authenticated_user)):
-    init_diet_db()
     if body.goal not in GOALS:
         raise HTTPException(400, "Objetivo no valido")
     conn = get_connection()
@@ -181,7 +178,6 @@ def put_profile(body: DietProfileIn, current_user=Depends(get_authenticated_user
 
 @router.get("/week")
 def get_week(start: str | None = None, current_user=Depends(get_authenticated_user)):
-    init_diet_db()
     week_start = _monday(date.fromisoformat(start) if start else date.today())
     conn = get_connection()
     try:
@@ -195,7 +191,6 @@ def get_week(start: str | None = None, current_user=Depends(get_authenticated_us
 
 @router.post("/week/generate")
 def regenerate_week(start: str | None = None, current_user=Depends(get_authenticated_user)):
-    init_diet_db()
     week_start = _monday(date.fromisoformat(start) if start else date.today())
     conn = get_connection()
     try:
@@ -206,7 +201,6 @@ def regenerate_week(start: str | None = None, current_user=Depends(get_authentic
 
 @router.post("/swap")
 def swap(body: SwapIn, current_user=Depends(get_authenticated_user)):
-    init_diet_db()
     try:
         day = date.fromisoformat(body.date)
     except ValueError:
@@ -246,7 +240,6 @@ def get_shopping(start: str | None = None, current_user=Depends(get_authenticate
 
 @router.post("/log")
 def log_meal(body: MealLogIn, current_user=Depends(get_authenticated_user)):
-    init_diet_db()
     try:
         date.fromisoformat(body.date)
     except ValueError:
@@ -266,7 +259,6 @@ def log_meal(body: MealLogIn, current_user=Depends(get_authenticated_user)):
 
 @router.get("/log")
 def list_logs(day: str | None = None, current_user=Depends(get_authenticated_user)):
-    init_diet_db()
     conn = get_connection()
     try:
         if day:

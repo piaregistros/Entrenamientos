@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from datetime import date, timedelta
 from .diet_catalog import GOALS, recipe_by_id, recipes_for
+from .diet_text import accentuate
 
 WEEKDAYS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
 
@@ -193,6 +194,7 @@ def _fmt(name, grams, ml, count):
         qty = str(int(round(count)))
     else:
         qty = "al gusto"
+    name = accentuate(name)
     return f"{name[:1].upper() + name[1:]} — {qty}"
 
 def shopping_list(week):

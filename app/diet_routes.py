@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from .auth import get_authenticated_user
 from .database import get_connection
 from .diet_catalog import GOALS, RECIPES, recipe_by_id
+from .diet_text import accentuate_week
 from .diet_engine import build_week, shopping_list
 from .diet_swap import swap_meal
 
@@ -186,7 +187,7 @@ def get_week(start: str | None = None, current_user=Depends(get_authenticated_us
     try:
         row = conn.execute("SELECT payload FROM diet_week_plans WHERE user_id=? AND week_start=?", (current_user["id"], week_start.isoformat())).fetchone()
         if row:
-            return json.loads(row["payload"])
+            return accentuate_week(json.loads(row["payload"]))
         return _generate_and_store(conn, current_user["id"], week_start, _profile_row(conn, current_user["id"]))
     finally:
         conn.close()
@@ -215,7 +216,7 @@ def swap(body: SwapIn, current_user=Depends(get_authenticated_user)):
     try:
         row = conn.execute("SELECT payload FROM diet_week_plans WHERE user_id=? AND week_start=?", (current_user["id"], week_start.isoformat())).fetchone()
         if row:
-            week = json.loads(row["payload"])
+            week = accentuate_week(json.loads(row["payload"]))
         else:
             week = _generate_and_store(conn, current_user["id"], week_start, _profile_row(conn, current_user["id"]))
         try:

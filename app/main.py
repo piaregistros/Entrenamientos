@@ -115,6 +115,13 @@ def get_users(current_user = Depends(get_authenticated_user)):
     return [dict(row) for row in rows]
 
 
+def _ensure_session_label(conn) -> None:
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(routines)")}
+    if "session_label" not in cols:
+        conn.execute("ALTER TABLE routines ADD COLUMN session_label TEXT")
+        conn.commit()
+
+
 @app.get("/api/routines")
 def get_routines(
     user_id: str | None = None,
@@ -123,10 +130,11 @@ def get_routines(
     target_user_id = resolve_target_user(current_user, user_id)
 
     conn = get_connection()
+    _ensure_session_label(conn)
 
     rows = conn.execute(
         """
-        SELECT id, user_id, name, day_order, is_active, created_at
+        SELECT id, user_id, name, day_order, is_active, session_label, created_at
         FROM routines
         WHERE user_id = ?
           AND is_active = 1
@@ -212,6 +220,62 @@ def get_routine(
 
     return result
 
+
+
+@app.get("/api/routines/{routine_id}/overlap")
+def routine_overlap(
+    routine_id: str,
+    current_user = Depends(get_authenticated_user),
+):
+    conn = get_connection()
+    _ensure_session_label(conn)
+    routine = conn.execute(
+        "SELECT id, user_id, name FROM routines WHERE id = ?",
+        (routine_id,),
+    ).fetchone()
+    if routine is None or (
+        current_user["role"] != "admin"
+        and routine["user_id"] != current_user["id"]
+    ):
+        conn.close()
+        raise HTTPException(status_code=404, detail="Rutina no encontrada")
+
+    last = conn.execute(
+        """
+        SELECT wl.id, wl.date, r.name AS routine_name
+        FROM workout_logs wl
+        LEFT JOIN routines r ON r.id = wl.routine_id
+        WHERE wl.user_id = ? AND wl.status = 'completed'
+        ORDER BY wl.date DESC
+        LIMIT 1
+        """,
+        (routine["user_id"],),
+    ).fetchone()
+    names = []
+    if last is not None:
+        names = [
+            row["name"]
+            for row in conn.execute(
+                """
+                SELECT DISTINCT e.name
+                FROM workout_sets ws
+                JOIN routine_exercises re
+                  ON re.exercise_id = ws.exercise_id
+                 AND re.routine_id = ?
+                JOIN exercises e ON e.id = ws.exercise_id
+                WHERE ws.workout_log_id = ?
+                  AND ws.is_warmup = 0
+                ORDER BY e.name
+                """,
+                (routine_id, last["id"]),
+            )
+        ]
+    conn.close()
+    return {
+        "exercises": names,
+        "last_date": None if last is None else last["date"],
+        "last_routine_name": None if last is None else last["routine_name"],
+    }
 
 
 @app.get("/api/routines/{routine_id}/with-last-performance")

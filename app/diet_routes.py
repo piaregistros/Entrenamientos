@@ -86,7 +86,9 @@ def _latest_weight(conn, user_id: str):
 
 
 def _routines(conn, user_id: str):
-    rows = conn.execute("SELECT id, name, day_order, is_active FROM routines WHERE user_id=? AND is_active=1 ORDER BY day_order", (user_id,)).fetchall()
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(routines)")}
+    extra = ", session_label" if "session_label" in cols else ""
+    rows = conn.execute(f"SELECT id, name, day_order, is_active{extra} FROM routines WHERE user_id=? AND is_active=1 ORDER BY day_order", (user_id,)).fetchall()
     return [dict(r) for r in rows]
 
 

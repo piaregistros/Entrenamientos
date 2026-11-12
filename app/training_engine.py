@@ -84,6 +84,7 @@ class PlannedExercise:
 class Session:
     name: str
     exercises: list[PlannedExercise] = field(default_factory=list)
+    label: str = ""
 
     @property
     def total_sets(self):
@@ -1610,6 +1611,52 @@ def _accumulate_candidate_volume(
 
 
 
+
+def _five_day_push_pull():
+    """
+    5 días con cada músculo dos veces por semana.
+    A empuje, B tirón, C pierna, D torso, E pierna.
+    No es un full body repetido ni un músculo una sola vez por semana.
+    """
+    return [
+        [
+            _slot(patterns=["horizontal_push"], muscles=["chest"], role="empuje horizontal", compound=True),
+            _slot(patterns=["vertical_push"], muscles=["delts"], role="empuje vertical", compound=True),
+            _slot(patterns=["shoulder_abduction"], muscles=["lateral_delts", "delts"], role="deltoides lateral", isolation=True),
+            _slot(patterns=["elbow_extension"], muscles=["triceps"], role="tríceps", isolation=True),
+            _slot(patterns=["chest_isolation"], muscles=["chest", "upper_chest"], role="pecho accesorio", isolation=True),
+        ],
+        [
+            _slot(patterns=["vertical_pull"], muscles=["back"], role="tirón vertical", compound=True),
+            _slot(patterns=["horizontal_pull"], muscles=["back"], role="tirón horizontal", compound=True),
+            _slot(patterns=["rear_delt"], muscles=["rear_delts"], role="deltoides posterior", isolation=True),
+            _slot(patterns=["elbow_flexion"], muscles=["biceps"], role="bíceps", isolation=True),
+            _slot(patterns=["shoulder_extension"], muscles=["back"], role="espalda accesoria", isolation=True),
+        ],
+        [
+            _slot(patterns=["squat"], muscles=["quads", "quads_glutes"], role="cuádriceps", compound=True, allow_related=True),
+            _slot(patterns=["hinge"], muscles=["hamstrings", "ham_glutes"], role="cadena posterior", compound=True, allow_related=True),
+            _slot(patterns=["hip_extension"], muscles=["glutes"], role="glúteos", compound=True),
+            _slot(patterns=["knee_flexion"], muscles=["hamstrings"], role="isquiosurales", isolation=True),
+            _slot(patterns=["plantar_flexion"], muscles=["calves"], role="gemelos", isolation=True),
+        ],
+        [
+            _slot(patterns=["horizontal_push"], muscles=["chest", "upper_chest"], role="segundo empuje", compound=True),
+            _slot(patterns=["horizontal_pull"], muscles=["back"], role="segundo tirón", compound=True),
+            _slot(patterns=["shoulder_abduction"], muscles=["lateral_delts", "delts"], role="deltoides lateral", isolation=True),
+            _slot(patterns=["elbow_extension"], muscles=["triceps"], role="tríceps", isolation=True),
+            _slot(patterns=["elbow_flexion"], muscles=["biceps"], role="bíceps", isolation=True),
+        ],
+        [
+            _slot(patterns=["unilateral_leg", "squat"], muscles=["quads", "glutes", "quads_glutes"], role="pierna unilateral", compound=True, allow_related=True),
+            _slot(patterns=["hip_extension"], muscles=["glutes"], role="glúteos", compound=True),
+            _slot(patterns=["knee_extension"], muscles=["quads"], role="cuádriceps", isolation=True),
+            _slot(patterns=["knee_flexion"], muscles=["hamstrings"], role="isquiosurales", isolation=True),
+            _slot(patterns=["core", "anti_rotation"], muscles=["core"], role="core", isolation=True),
+        ],
+    ]
+
+
 def _templates_v28(profile, goal, days):
     """
     V2.8 — plantillas orientadas a distribución.
@@ -1625,6 +1672,11 @@ def _templates_v28(profile, goal, days):
     priority = _norm(
         _profile(profile, "priority", "balanced")
     )
+
+    # 5 días y no es un programa de glúteos: empuje/tirón/pierna.
+    # También si es principiante. Repetir un full body cinco veces no aporta.
+    if days >= 5 and goal != "glutes" and priority != "glutes":
+        return _five_day_push_pull()
 
     # ============================================================
     # PRINCIPIANTE
@@ -1866,7 +1918,7 @@ def _templates_v28(profile, goal, days):
         if days == 3:
             return base
 
-        return base + [
+        fourth = [
             [
                 _slot(
                     patterns=["unilateral_leg"],
@@ -1893,6 +1945,17 @@ def _templates_v28(profile, goal, days):
                     role="tirón horizontal",
                     compound=True,
                 ),
+            ],
+        ]
+        if days < 5:
+            return base + fourth
+        return base + fourth + [
+            [
+                _slot(patterns=["hip_extension"], muscles=["glutes"], role="glúteo", compound=True),
+                _slot(patterns=["unilateral_leg"], muscles=["glutes", "quads_glutes"], role="unilateral", compound=True, allow_related=True),
+                _slot(patterns=["vertical_push"], muscles=["delts"], role="empuje", compound=True),
+                _slot(patterns=["plantar_flexion"], muscles=["calves"], role="gemelos", isolation=True),
+                _slot(patterns=["core"], muscles=["core"], role="core", isolation=True),
             ],
         ]
 
@@ -2367,143 +2430,8 @@ def _templates_v28(profile, goal, days):
             ],
         ]
 
-    # 5 días: estructura específica, no upper_lower_4 reciclado.
     if days >= 5:
-        return [
-            [
-                _slot(
-                    patterns=["horizontal_push"],
-                    muscles=["chest"],
-                    role="pecho",
-                    compound=True,
-                ),
-                _slot(
-                    patterns=["vertical_pull"],
-                    muscles=["back"],
-                    role="espalda",
-                    compound=True,
-                ),
-                _slot(
-                    patterns=["shoulder_abduction"],
-                    muscles=["lateral_delts"],
-                    role="deltoides lateral",
-                    isolation=True,
-                ),
-                _slot(
-                    patterns=["elbow_flexion"],
-                    muscles=["biceps"],
-                    role="bíceps",
-                    isolation=True,
-                ),
-            ],
-            [
-                _slot(
-                    patterns=["squat"],
-                    muscles=["quads", "quads_glutes"],
-                    role="pierna",
-                    compound=True,
-                    allow_related=True,
-                ),
-                _slot(
-                    patterns=["hinge"],
-                    muscles=["hamstrings", "ham_glutes"],
-                    role="cadena posterior",
-                    compound=True,
-                    allow_related=True,
-                ),
-                _slot(
-                    patterns=["plantar_flexion"],
-                    muscles=["calves"],
-                    role="gemelos",
-                    isolation=True,
-                ),
-                _slot(
-                    patterns=["core"],
-                    muscles=["core"],
-                    role="core",
-                    isolation=True,
-                ),
-            ],
-            [
-                _slot(
-                    patterns=["horizontal_pull"],
-                    muscles=["back"],
-                    role="espalda media",
-                    compound=True,
-                ),
-                _slot(
-                    patterns=["horizontal_push"],
-                    muscles=["chest"],
-                    role="pecho",
-                    compound=True,
-                ),
-                _slot(
-                    patterns=["elbow_extension"],
-                    muscles=["triceps"],
-                    role="tríceps",
-                    isolation=True,
-                ),
-                _slot(
-                    patterns=["rear_delt"],
-                    muscles=["rear_delts"],
-                    role="deltoides posterior",
-                    isolation=True,
-                ),
-            ],
-            [
-                _slot(
-                    patterns=["unilateral_leg", "squat"],
-                    muscles=["quads", "glutes"],
-                    role="pierna unilateral",
-                    compound=True,
-                    allow_related=True,
-                ),
-                _slot(
-                    patterns=["hip_extension"],
-                    muscles=["glutes"],
-                    role="glúteos",
-                    compound=True,
-                ),
-                _slot(
-                    patterns=["knee_flexion"],
-                    muscles=["hamstrings"],
-                    role="isquiosurales",
-                    isolation=True,
-                ),
-                _slot(
-                    patterns=["plantar_flexion"],
-                    muscles=["calves"],
-                    role="gemelos",
-                    isolation=True,
-                ),
-            ],
-            [
-                _slot(
-                    patterns=["horizontal_push", "vertical_push"],
-                    muscles=["chest", "delts"],
-                    role="empuje complementario",
-                    compound=True,
-                ),
-                _slot(
-                    patterns=["vertical_pull", "horizontal_pull"],
-                    muscles=["back"],
-                    role="tirón complementario",
-                    compound=True,
-                ),
-                _slot(
-                    patterns=["elbow_flexion"],
-                    muscles=["biceps"],
-                    role="bíceps",
-                    isolation=True,
-                ),
-                _slot(
-                    patterns=["elbow_extension"],
-                    muscles=["triceps"],
-                    role="tríceps",
-                    isolation=True,
-                ),
-            ],
-        ]
+        return _five_day_push_pull()
 
     return _templates(profile, goal, min(days, 4))
 
@@ -2530,16 +2458,31 @@ def generate_engine_program(profile, catalog):
     elif days == 4:
         program_id = "upper_lower_4"
     elif days >= 5:
-        program_id = "hypertrophy_5"
+        if goal == "glutes" or priority == "glutes":
+            program_id = "glutes_5"
+        elif goal == "strength":
+            program_id = "strength_5"
+        else:
+            program_id = "push_pull_5"
     else:
         program_id = "hypertrophy_3"
 
     templates = _templates_v28(profile, goal, days)
 
-    sessions = [
-        Session(f"Día {chr(65 + i)}")
-        for i in range(days)
-    ]
+    label_by_program = {
+        "push_pull_5": ["Empuje", "Tirón", "Pierna", "Torso", "Pierna"],
+        "beginner_5_push_pull": ["Empuje", "Tirón", "Pierna", "Torso", "Pierna"],
+        "strength_5": ["Empuje", "Tirón", "Pierna", "Torso", "Pierna"],
+        "glutes_5": ["Glúteo", "Pierna", "Glúteo", "Complemento", "Glúteo"],
+        "hypertrophy_5": ["Torso", "Pierna", "Torso", "Pierna", "Torso"],
+    }
+    labels = label_by_program.get(program_id, [])
+    sessions = []
+    for i in range(days):
+        session = Session(f"Día {chr(65 + i)}")
+        if i < len(labels):
+            session.label = labels[i]
+        sessions.append(session)
 
     global_used = set()
 

@@ -274,6 +274,145 @@ def _admin_count(conn) -> int:
     row = conn.execute("SELECT COUNT(*) AS n FROM users WHERE role = 'admin'").fetchone()
     return int(row["n"])
 
+
+def _user_usage(conn, user_id: str) -> dict:
+    import json
+
+    def cols(table):
+        try:
+            return [row[1] for row in conn.execute(f'PRAGMA table_info("{table}")')]
+        except Exception:
+            return []
+
+    def one(sql, args=()):
+        try:
+            return conn.execute(sql, args).fetchone()
+        except Exception:
+            return None
+
+    def day(value):
+        if not value:
+            return None
+        parts = str(value)[:10].split("-")
+        if len(parts) == 3 and len(parts[0]) == 4:
+            return parts[2] + "/" + parts[1]
+        return str(value)[:10]
+
+    def kilos(value):
+        if value is None:
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        if number <= 0:
+            return None
+        return str(int(number)) if number == int(number) else str(round(number, 1))
+
+    labels = {
+        "hypertrophy": "hipertrofia",
+        "strength": "fuerza",
+        "glutes": "glúteo",
+        "general": "general",
+        "push_pull_5": "empuje y tirón",
+        "strength_5": "fuerza",
+        "glutes_5": "glúteo",
+        "hypertrophy_3": "full body",
+        "recomp": "recomposición",
+        "cut": "definición",
+        "bulk": "volumen",
+    }
+
+    test_done = False
+    test_at = None
+    if "completed_at" in cols("user_onboarding"):
+        row = one("SELECT completed_at FROM user_onboarding WHERE user_id = ?", (user_id,))
+        if row and row["completed_at"]:
+            test_done = True
+            test_at = day(row["completed_at"])
+
+    plan = None
+    days = None
+    if "user_id" in cols("user_training_profiles"):
+        row = one("SELECT * FROM user_training_profiles WHERE user_id = ?", (user_id,))
+        if row:
+            data = dict(row)
+            blob = None
+            for key in ("answers_json", "profile_json", "answers", "data", "profile"):
+                raw = data.get(key)
+                if isinstance(raw, str) and raw.startswith("{"):
+                    try:
+                        blob = json.loads(raw)
+                    except Exception:
+                        blob = None
+                    break
+            src = blob if isinstance(blob, dict) else data
+            if isinstance(src.get("answers"), dict):
+                merged = dict(src["answers"])
+                merged.update(src)
+                src = merged
+            raw_plan = src.get("program_id") or src.get("goal") or src.get("style")
+            if raw_plan is not None:
+                plan = labels.get(str(raw_plan), str(raw_plan))
+            raw_days = src.get("days") or src.get("days_per_week")
+            if raw_days is not None:
+                days = str(raw_days).replace("_", "-")
+
+    workouts = 0
+    last_workout = None
+    if "user_id" in cols("workout_logs"):
+        row = one(
+            "SELECT COUNT(*) AS n FROM workout_logs WHERE user_id = ? AND status = 'completed'",
+            (user_id,),
+        )
+        workouts = int(row["n"]) if row else 0
+        if "date" in cols("workout_logs"):
+            row = one(
+                """SELECT date AS d FROM workout_logs
+                   WHERE user_id = ? AND status = 'completed'
+                   ORDER BY date DESC LIMIT 1""",
+                (user_id,),
+            )
+            if row and row["d"]:
+                last_workout = day(row["d"])
+
+    weight = None
+    if "weight_kg" in cols("diet_profiles"):
+        row = one("SELECT weight_kg FROM diet_profiles WHERE user_id = ?", (user_id,))
+        if row:
+            weight = kilos(row["weight_kg"])
+
+    meals = 0
+    if "user_id" in cols("diet_meal_logs"):
+        eaten = " AND eaten = 1" if "eaten" in cols("diet_meal_logs") else ""
+        row = one(f"SELECT COUNT(*) AS n FROM diet_meal_logs WHERE user_id = ?{eaten}", (user_id,))
+        meals = int(row["n"]) if row else 0
+
+    classes = 0
+    if "user_id" in cols("activity_logs"):
+        row = one("SELECT COUNT(*) AS n FROM activity_logs WHERE user_id = ?", (user_id,))
+        classes = int(row["n"]) if row else 0
+
+    test_bits = ["Test hecho" + (f" el {test_at}" if test_at else "")] if test_done else ["Test pendiente"]
+    if days:
+        test_bits.append(days + " días")
+    if plan:
+        test_bits.append(plan)
+    use_bits = []
+    if workouts:
+        use_bits.append(f"{workouts} entreno" + ("" if workouts == 1 else "s"))
+        if last_workout:
+            use_bits.append("último " + last_workout)
+    else:
+        use_bits.append("Sin entrenos")
+    if classes:
+        use_bits.append(f"{classes} clase" + ("" if classes == 1 else "s"))
+    if weight:
+        use_bits.append(weight + " kg")
+    if meals:
+        use_bits.append(f"{meals} comida" + ("" if meals == 1 else "s"))
+    return {"test_line": " · ".join(test_bits), "use_line": " · ".join(use_bits)}
+
 @router.get("/admin/users")
 def admin_list_users(request: Request):
     conn, _admin = _admin_or_403(request)
@@ -281,7 +420,12 @@ def admin_list_users(request: Request):
         rows = conn.execute(
             "SELECT id, name, role FROM users ORDER BY lower(name)"
         ).fetchall()
-        return {"users": [{"id": r["id"], "name": r["name"], "role": r["role"]} for r in rows]}
+        users = []
+        for r in rows:
+            item = {"id": r["id"], "name": r["name"], "role": r["role"]}
+            item.update(_user_usage(conn, r["id"]))
+            users.append(item)
+        return {"users": users}
     finally:
         conn.close()
 

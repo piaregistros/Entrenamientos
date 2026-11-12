@@ -89,14 +89,22 @@ def scale_meals(meals, target_kcal):
 
 def map_training_days(routines, week_start):
     active = sorted([r for r in routines if r.get("is_active", 1)], key=lambda r: r.get("day_order") or 0)
+    # Reparte las sesiones con un descanso en medio. 5 días: lun, mar, jue, vie, sáb.
+    offsets = {1: [0], 2: [0, 3], 3: [0, 2, 4], 4: [0, 1, 3, 4], 5: [0, 1, 3, 4, 5]}.get(len(active), [0, 2, 4])
     mapping = {}
-    for idx, off in enumerate([0, 2, 4]):
+    for idx, off in enumerate(offsets):
+        if idx >= len(active):
+            break
         day = week_start + timedelta(days=off)
-        routine = active[idx] if idx < len(active) else None
+        routine = active[idx]
+        label = routine.get("session_label")
+        name = routine.get("name") or "?"
+        if label:
+            name = f"{name} · {label}"
         mapping[day.isoformat()] = {
             "kind": "train",
-            "routine_name": (routine or {}).get("name") or ["A", "B", "C"][idx],
-            "day_order": (routine or {}).get("day_order") or idx + 1,
+            "routine_name": name,
+            "day_order": routine.get("day_order") or idx + 1,
         }
     return mapping
 

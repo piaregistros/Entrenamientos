@@ -112,18 +112,36 @@ def apply_progression(conn, user_id: str, workout_id: str) -> None:
         )
 
 
-def _overlap(conn, last_routine_id: str | None, next_routine_id: str | None) -> list[str]:
-    if not last_routine_id or not next_routine_id:
+def _ensure_session_label(conn) -> None:
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(routines)")}
+    if "session_label" not in cols:
+        conn.execute("ALTER TABLE routines ADD COLUMN session_label TEXT")
+        conn.commit()
+
+
+def _shown(row) -> str:
+    label = row["session_label"] if row and "session_label" in row.keys() else None
+    if row and label:
+        return f"{row['name']} · {label}"
+    return row["name"] if row else ""
+
+
+def _overlap(conn, last_workout_id: str | None, next_routine_id: str | None) -> list[str]:
+    if not last_workout_id or not next_routine_id:
         return []
     rows = conn.execute(
         """
-        SELECT e.name
-        FROM routine_exercises a
-        JOIN routine_exercises b ON b.exercise_id = a.exercise_id
-        JOIN exercises e ON e.id = a.exercise_id
-        WHERE a.routine_id = ? AND b.routine_id = ?
+        SELECT DISTINCT e.name
+        FROM workout_sets ws
+        JOIN routine_exercises re
+          ON re.exercise_id = ws.exercise_id
+         AND re.routine_id = ?
+        JOIN exercises e ON e.id = ws.exercise_id
+        WHERE ws.workout_log_id = ?
+          AND ws.is_warmup = 0
+        ORDER BY e.name
         """,
-        (last_routine_id, next_routine_id),
+        (next_routine_id, last_workout_id),
     ).fetchall()
     return [r["name"] for r in rows]
 
@@ -133,6 +151,7 @@ def home(user_id: str, current_user=Depends(get_authenticated_user)):
     init_progress_db()
     user_id = resolve_target_user(current_user, user_id)
     conn = get_connection()
+    _ensure_session_label(conn)
     last = conn.execute(
         """
         SELECT id, routine_id, date, routine_id
@@ -143,7 +162,7 @@ def home(user_id: str, current_user=Depends(get_authenticated_user)):
         (user_id,),
     ).fetchone()
     routines = conn.execute(
-        "SELECT id, name FROM routines WHERE is_active = 1 AND user_id = ? ORDER BY name",
+        "SELECT id, name, session_label FROM routines WHERE is_active = 1 AND user_id = ? ORDER BY day_order",
         (user_id,),
     ).fetchall()
     next_r = None
@@ -157,7 +176,7 @@ def home(user_id: str, current_user=Depends(get_authenticated_user)):
                 next_r = routines[(i + 1) % len(routines)]
             except ValueError:
                 next_r = routines[0]
-    overlap = _overlap(conn, last["routine_id"] if last else None, next_r["id"] if next_r else None)
+    overlap = _overlap(conn, last["id"] if last else None, next_r["id"] if next_r else None)
     last_deload = conn.execute(
         """
         SELECT date FROM workout_logs
@@ -252,12 +271,10 @@ def home(user_id: str, current_user=Depends(get_authenticated_user)):
     return {
         "last_workout_id": last["id"] if last else None,
         "next_routine_id": next_r["id"] if next_r else None,
-        "next_routine_name": next_r["name"] if next_r else None,
+        "next_routine_name": _shown(next_r) if next_r else None,
         "overlap": overlap,
         "tomorrow": (
-            f"Mañana: {next_r['name']}. Solapa: {', '.join(overlap)}."
-            if next_r and overlap
-            else f"Mañana: {next_r['name']}. Sin solape directo."
+            f"Siguiente: {_shown(next_r)}."
             if next_r
             else "Sin rutina activa."
         ),

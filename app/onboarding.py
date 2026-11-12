@@ -345,6 +345,12 @@ def _get_active_exercise_catalog(conn) -> list[dict]:
     return [dict(row) for row in rows]
 
 
+def _ensure_session_label(conn) -> None:
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(routines)")}
+    if "session_label" not in cols:
+        conn.execute("ALTER TABLE routines ADD COLUMN session_label TEXT")
+
+
 def _create_engine_program(
     conn,
     user_id: str,
@@ -362,6 +368,7 @@ def _create_engine_program(
     if _get_user_routine_count(conn, user_id) > 0:
         return []
 
+    _ensure_session_label(conn)
     catalog = _get_active_exercise_catalog(conn)
 
     if not catalog:
@@ -391,6 +398,7 @@ def _create_engine_program(
 
         # El nombre visible será A, B, C...
         routine_name = chr(64 + day_order)
+        label = getattr(session, "label", None) or None
 
         conn.execute(
             """
@@ -399,15 +407,17 @@ def _create_engine_program(
                 user_id,
                 name,
                 day_order,
-                is_active
+                is_active,
+                session_label
             )
-            VALUES (?, ?, ?, ?, 1)
+            VALUES (?, ?, ?, ?, 1, ?)
             """,
             (
                 routine_id,
                 user_id,
                 routine_name,
                 day_order,
+                label,
             ),
         )
 

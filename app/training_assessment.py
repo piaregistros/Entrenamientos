@@ -166,6 +166,15 @@ def build_training_profile(answers: dict[str, str]) -> TrainingProfile:
 
 
 def select_program(profile: TrainingProfile) -> str:
+    if profile.days_per_week >= 5:
+        if profile.goal == "glutes" or profile.priority == "glutes":
+            return "glutes_5"
+        if profile.goal == "strength":
+            return "strength_5"
+        if profile.experience == "beginner":
+            return "beginner_5_push_pull"
+        return "push_pull_5"
+
     days = min(profile.days_per_week, 4)
 
     if profile.experience == "beginner":
@@ -217,6 +226,14 @@ def explain_selection(profile: TrainingProfile, program_id: str) -> str:
             "3 días orientados principalmente a fuerza.",
         "strength_4":
             "4 días orientados principalmente a fuerza.",
+        "push_pull_5":
+            "5 días: empuje, tirón, pierna, torso y pierna. Cada músculo, dos veces por semana.",
+        "beginner_5_push_pull":
+            "5 días con la misma estructura empuje/tirón/pierna, con menos series por ejercicio.",
+        "strength_5":
+            "5 días de fuerza: empuje, tirón y pierna, con los básicos repetidos dos veces.",
+        "glutes_5":
+            "5 días con más frecuencia de glúteo y tren inferior.",
     }
 
     return explanations.get(

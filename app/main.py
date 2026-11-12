@@ -1,4 +1,5 @@
 import json
+import logging
 import uuid
 from pathlib import Path
 
@@ -13,6 +14,8 @@ from .diet_routes import router as diet_router, init_diet_db
 from .progress_routes import router as progress_router, init_progress_db, apply_progression, refresh_progress_after_set_edit
 from .onboarding_routes import router as onboarding_router
 from .workout_extras import router as workout_extras_router, load_extra_exercises, load_substitutions
+from .exercise_sheets import ensure_exercise_sheets, attach_sheet_fields
+from .exercise_info_routes import router as exercise_info_router
 from .auth import (
     get_authenticated_user,
     require_admin,
@@ -39,6 +42,7 @@ app.include_router(diet_router)
 app.include_router(progress_router)
 app.include_router(onboarding_router)
 app.include_router(workout_extras_router)
+app.include_router(exercise_info_router)
 
 app.add_api_route(
     "/api/workouts/in-progress",
@@ -86,6 +90,9 @@ async def csrf_protection_middleware(request, call_next):
     return await call_next(request)
 
 
+logger = logging.getLogger(__name__)
+
+
 @app.on_event("startup")
 def startup():
     # Todo el DDL / migraciones se hace UNA vez aquí, nunca en peticiones GET
@@ -97,6 +104,14 @@ def startup():
     conn = get_connection()
     try:
         _ensure_session_label(conn)
+    finally:
+        conn.close()
+    # Fase 5: fichas de ejercicio + vídeos (idempotente, una sola vez al arrancar).
+    conn = get_connection()
+    try:
+        ensure_exercise_sheets(conn)
+    except Exception:
+        logger.exception("No se pudieron aplicar las fichas/vídeos de ejercicios; la app sigue arrancando")
     finally:
         conn.close()
 
@@ -3266,11 +3281,13 @@ def list_exercises(
 
     rows = conn.execute(query, params).fetchall()
 
+    exercises = attach_sheet_fields(conn, [dict(row) for row in rows])
+
     conn.close()
 
     return {
         "count": len(rows),
-        "exercises": [dict(row) for row in rows],
+        "exercises": exercises,
     }
 
 @app.get("/api/exercises/{exercise_id}/last-performance")

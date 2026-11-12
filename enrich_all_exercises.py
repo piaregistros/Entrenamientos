@@ -325,6 +325,11 @@ DATA = {
 }
 
 def main():
+    import sys
+    if "--force" not in sys.argv:
+        print("OBSOLETO: las fichas de los 59 ejercicios se aplican ahora al arrancar (app/exercise_sheets.py).\n"
+              "Este script contiene textos antiguos y algunos incorrectos; usa --force solo si sabes lo que haces.")
+        return
     conn = sqlite3.connect("data/entrenamiento.db")
     cols = {r[1] for r in conn.execute("PRAGMA table_info(exercises)")}
     for col in ("steps", "technical_cues", "common_mistakes", "video_url"):

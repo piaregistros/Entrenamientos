@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends
 from app.auth import get_authenticated_user, resolve_target_user
 from app.database import get_connection
 from app.workout_expiration import workout_is_expired
+from app.progress_routes import recompute_exercise_progress
 
 router = APIRouter()
 
@@ -188,7 +189,7 @@ def delete_workout(
     try:
         workout = conn.execute(
             """
-            SELECT id
+            SELECT id, status
             FROM workout_logs
             WHERE id = ? AND user_id = ?
             """,
@@ -201,6 +202,15 @@ def delete_workout(
                 status_code=404,
                 detail="Entrenamiento no encontrado",
             )
+
+        # Ejercicios cuya progresión pudo derivarse de este entreno.
+        affected_exercises = [
+            r["exercise_id"]
+            for r in conn.execute(
+                "SELECT DISTINCT exercise_id FROM workout_sets WHERE workout_log_id = ?",
+                (workout_id,),
+            )
+        ]
 
         conn.execute(
             """
@@ -217,6 +227,12 @@ def delete_workout(
             """,
             (workout_id, current_user["id"]),
         )
+
+        # La progresión guardada (carga recomendada "+2.5 kg") ya no debe
+        # reflejar un entreno que no existe: se recalcula desde el historial
+        # que queda o se elimina si no queda ninguno. Misma transacción.
+        if workout["status"] == "completed":
+            recompute_exercise_progress(conn, current_user["id"], affected_exercises)
 
         conn.commit()
 

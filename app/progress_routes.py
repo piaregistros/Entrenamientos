@@ -52,7 +52,7 @@ def _epley(weight: float, reps: int) -> float:
     return round(weight * (1 + reps / 30), 1)
 
 
-def apply_progression(conn, user_id: str, workout_id: str) -> None:
+def apply_progression(conn, user_id: str, workout_id: str, only: set | None = None) -> None:
     sets = conn.execute(
         """
         SELECT ws.exercise_id, ws.weight_kg, ws.reps, ws.rir, ws.is_warmup, e.name
@@ -67,6 +67,8 @@ def apply_progression(conn, user_id: str, workout_id: str) -> None:
         by_ex.setdefault(s["exercise_id"], []).append(s)
     now = datetime.utcnow().isoformat(timespec="seconds")
     for eid, rows in by_ex.items():
+        if only is not None and eid not in only:
+            continue
         name = (rows[0]["name"] or "").strip().lower()
         work = [r for r in rows if not r["is_warmup"]]
         if not work or name == "plancha":
@@ -110,6 +112,116 @@ def apply_progression(conn, user_id: str, workout_id: str) -> None:
             """,
             (user_id, eid, nxt, reason, now),
         )
+
+
+def _ensure_progress_tables(conn) -> None:
+    """Crea exercise_progress sobre la MISMA conexión si aún no existe.
+
+    Se usa desde rutas de escritura (borrar/editar entrenos) para no abrir una
+    segunda conexión mientras hay una transacción pendiente.
+    """
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='exercise_progress'"
+    ).fetchone()
+    if not exists:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS exercise_progress (
+                user_id TEXT NOT NULL,
+                exercise_id TEXT NOT NULL,
+                next_weight_kg REAL,
+                reason TEXT,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (user_id, exercise_id)
+            )
+            """
+        )
+
+
+def recompute_exercise_progress(conn, user_id: str, exercise_ids) -> None:
+    """Recalcula exercise_progress de esos ejercicios desde el historial real.
+
+    Para cada ejercicio: se borra su fila y, si todavía existe algún entreno
+    COMPLETADO con series de trabajo de ese ejercicio, se vuelve a derivar de
+    el más reciente. Si no queda ninguno, el ejercicio vuelve a "sin historial".
+    No hace commit: lo hace quien llama (misma transacción que el borrado).
+    """
+    ids = {e for e in (exercise_ids or []) if e}
+    if not ids:
+        return
+    _ensure_progress_tables(conn)
+    for eid in ids:
+        conn.execute(
+            "DELETE FROM exercise_progress WHERE user_id = ? AND exercise_id = ?",
+            (user_id, eid),
+        )
+        latest = conn.execute(
+            """
+            SELECT wl.id
+            FROM workout_logs wl
+            JOIN workout_sets ws ON ws.workout_log_id = wl.id
+            WHERE wl.user_id = ?
+              AND wl.status = 'completed'
+              AND ws.exercise_id = ?
+              AND ws.is_warmup = 0
+            ORDER BY wl.date DESC, wl.id DESC
+            LIMIT 1
+            """,
+            (user_id, eid),
+        ).fetchone()
+        if latest:
+            apply_progression(conn, user_id, latest["id"], only={eid})
+
+
+def rebuild_all_progress(conn, user_id: str | None = None) -> dict:
+    """Reconstruye TODA la tabla exercise_progress desde el historial.
+
+    Sirve para limpiar estados obsoletos que dejaron borrados anteriores.
+    Devuelve {"antes": n, "despues": m, "cambios": [...]} (sin commit).
+    """
+    _ensure_progress_tables(conn)
+    where = "WHERE user_id = ?" if user_id else ""
+    params = (user_id,) if user_id else ()
+    before = {
+        (r["user_id"], r["exercise_id"]): (r["next_weight_kg"], r["reason"])
+        for r in conn.execute(f"SELECT * FROM exercise_progress {where}", params)
+    }
+    users = [user_id] if user_id else [
+        r[0] for r in conn.execute(
+            "SELECT DISTINCT user_id FROM workout_logs UNION SELECT DISTINCT user_id FROM exercise_progress"
+        )
+    ]
+    for uid in users:
+        exercise_ids = {k[1] for k in before if k[0] == uid} | {
+            r[0] for r in conn.execute(
+                """
+                SELECT DISTINCT ws.exercise_id FROM workout_sets ws
+                JOIN workout_logs wl ON wl.id = ws.workout_log_id
+                WHERE wl.user_id = ? AND wl.status = 'completed'
+                """,
+                (uid,),
+            )
+        }
+        recompute_exercise_progress(conn, uid, exercise_ids)
+    after = {
+        (r["user_id"], r["exercise_id"]): (r["next_weight_kg"], r["reason"])
+        for r in conn.execute(f"SELECT * FROM exercise_progress {where}", params)
+    }
+    changes = []
+    for key in sorted(set(before) | set(after)):
+        if before.get(key) != after.get(key):
+            changes.append({"user_id": key[0], "exercise_id": key[1], "antes": before.get(key), "despues": after.get(key)})
+    return {"antes": len(before), "despues": len(after), "cambios": changes}
+
+
+def refresh_progress_after_set_edit(conn, user_id: str, workout_id: str, exercise_id: str) -> None:
+    """Si se añade/edita/borra una serie de un entreno YA completado, recalcula."""
+    row = conn.execute(
+        "SELECT status FROM workout_logs WHERE id = ? AND user_id = ?",
+        (workout_id, user_id),
+    ).fetchone()
+    if row and row["status"] == "completed":
+        recompute_exercise_progress(conn, user_id, {exercise_id})
 
 
 def _ensure_session_label(conn) -> None:

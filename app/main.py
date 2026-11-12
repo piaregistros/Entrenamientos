@@ -10,7 +10,7 @@ from .database import get_connection, init_db
 from .auth_routes import router as auth_router
 from .activity_routes import router as activity_router, init_activity_db
 from .diet_routes import router as diet_router, init_diet_db
-from .progress_routes import router as progress_router, init_progress_db, apply_progression
+from .progress_routes import router as progress_router, init_progress_db, apply_progression, refresh_progress_after_set_edit
 from .onboarding_routes import router as onboarding_router
 from .workout_extras import router as workout_extras_router, load_extra_exercises, load_substitutions
 from .auth import (
@@ -3998,6 +3998,8 @@ def add_workout_set(
         workout_set.notes,
     ))
 
+    refresh_progress_after_set_edit(conn, user_id, workout_id, workout_set.exercise_id)
+
     conn.commit()
 
     row = conn.execute("""
@@ -4189,6 +4191,8 @@ def update_workout_set(
         workout_id,
     ))
 
+    refresh_progress_after_set_edit(conn, user_id, workout_id, existing_set["exercise_id"])
+
     conn.commit()
 
     row = conn.execute("""
@@ -4295,6 +4299,8 @@ def delete_workout_set(
         set_id,
         workout_id,
     ))
+
+    refresh_progress_after_set_edit(conn, user_id, workout_id, existing_set["exercise_id"])
 
     conn.commit()
 

@@ -13,6 +13,8 @@ from .activity_routes import router as activity_router, init_activity_db
 from .diet_routes import router as diet_router, init_diet_db
 from .progress_routes import router as progress_router, init_progress_db, apply_progression, refresh_progress_after_set_edit
 from .onboarding_routes import router as onboarding_router
+from .progression_db import compute_exercise_target, ensure_progression_schema
+from .progression import MEASURE_TYPES, default_increment, infer_measure_type
 from .workout_extras import router as workout_extras_router, load_extra_exercises, load_substitutions
 from .exercise_sheets import ensure_exercise_sheets, attach_sheet_fields
 from .exercise_info_routes import router as exercise_info_router
@@ -145,6 +147,21 @@ def _ensure_session_label(conn) -> None:
     if "session_label" not in cols:
         conn.execute("ALTER TABLE routines ADD COLUMN session_label TEXT")
         conn.commit()
+
+
+@app.on_event("startup")
+def startup_progression():
+    # Fase 6: measure_type / weight_increment_kg de todos los ejercicios (idempotente).
+    # Handler propio: se ejecuta después de `startup` (y de las fichas de la Fase 5 si están).
+    import logging as _logging
+
+    conn = get_connection()
+    try:
+        ensure_progression_schema(conn)
+    except Exception:
+        _logging.getLogger(__name__).exception("No se pudo aplicar el esquema de progresión; la app sigue arrancando")
+    finally:
+        conn.close()
 
 
 @app.get("/api/routines")
@@ -4384,21 +4401,10 @@ def get_routine_recommendations(
     recommendations = []
 
     for exercise in exercises:
-        last_workout = conn.execute(
-            """
-            SELECT wl.id, wl.date
-            FROM workout_logs wl
-            JOIN workout_sets ws
-              ON ws.workout_log_id = wl.id
-            WHERE wl.user_id = ?
-              AND wl.status = 'completed'
-              AND ws.exercise_id = ?
-              AND ws.is_warmup = 0
-            ORDER BY datetime(wl.date) DESC
-            LIMIT 1
-            """,
-            (user_id, exercise["exercise_id"]),
-        ).fetchone()
+        # Fase 6: la misma doble progresión que apply_progression (app/progression.py)
+        result, _config = compute_exercise_target(
+            conn, user_id, exercise["exercise_id"], routine_id=routine_id
+        )
 
         base_response = {
             "exercise_id": exercise["exercise_id"],
@@ -4411,215 +4417,45 @@ def get_routine_recommendations(
             "weight_increment_kg": exercise["weight_increment_kg"],
             "progression_type": exercise["progression_type"],
             "rep_progression_enabled": bool(exercise["rep_progression_enabled"]),
+            "measure_type": result["measure_type"],
+            "unit": result["unit"],
+            "increment_kg": result["increment_kg"],
+            "fail_streak": result["fail_streak"],
         }
 
-        if last_workout is None:
-            recommendations.append(
-                {
-                    **base_response,
-                    "recommendation": "start",
-                    "recommended_weight_kg": None,
-                    "recommended_rep_target": exercise["target_rep_min"],
-                    "reason": (
-                        "No hay histórico de series efectivas. "
-                        f"Empieza con una carga que permita "
-                        f"{exercise['target_rep_min']}-{exercise['target_rep_max']} "
-                        f"repeticiones dejando aproximadamente "
-                        f"{exercise['target_rir']} RIR."
-                    ),
-                    "last_performance": None,
-                }
-            )
-            continue
-
-        last_sets = conn.execute(
-            """
-            SELECT set_number, weight_kg, reps, rir
-            FROM workout_sets
-            WHERE workout_log_id = ?
-              AND exercise_id = ?
-              AND is_warmup = 0
-            ORDER BY set_number
-            """,
-            (
-                last_workout["id"],
-                exercise["exercise_id"],
-            ),
-        ).fetchall()
-
-        if not last_sets:
-            recommendations.append(
-                {
-                    **base_response,
-                    "recommendation": "start",
-                    "recommended_weight_kg": None,
-                    "recommended_rep_target": exercise["target_rep_min"],
-                    "reason": "No hay series efectivas registradas.",
-                    "last_performance": None,
-                }
-            )
-            continue
-
-        reps = [int(row["reps"]) for row in last_sets]
-        weights = [float(row["weight_kg"]) for row in last_sets]
-        rirs = [row["rir"] for row in last_sets]
-
-        current_weight = max(weights)
-
-        all_reached_min = all(
-            rep >= exercise["target_rep_min"]
-            for rep in reps
-        )
-
-        all_reached_max = all(
-            rep >= exercise["target_rep_max"]
-            for rep in reps
-        )
-
-        rir_available = all(rir is not None for rir in rirs)
-
-        all_rir_at_or_above_target = (
-            rir_available
-            and all(
-                int(rir) >= exercise["target_rir"]
-                for rir in rirs
-            )
-        )
-
-        any_rir_too_low = any(
-            int(rir) < exercise["target_rir"]
-            for rir in rirs
-            if rir is not None
-        )
-
-        rep_progression_enabled = bool(
-            exercise["rep_progression_enabled"]
-        )
-
-        weight_increment = (
-            float(exercise["weight_increment_kg"])
-            if exercise["weight_increment_kg"] is not None
-            else 0.0
-        )
-
-        # ---------------------------------------------------------
-        # DOBLE PROGRESIÓN
-        # ---------------------------------------------------------
-
-        if not all_reached_min:
-            recommendation = "maintain_weight"
-            recommended_weight = current_weight
-            recommended_rep_target = exercise["target_rep_min"]
-
-            reason = (
-                f"No todas las series han alcanzado el mínimo de "
-                f"{exercise['target_rep_min']} repeticiones. "
-                f"Mantén {current_weight:g} kg e intenta completar "
-                f"al menos {exercise['target_rep_min']} repeticiones "
-                "en todas las series."
-            )
-
-        elif all_reached_max:
-            if rir_available and all_rir_at_or_above_target:
-                if weight_increment > 0:
-                    recommendation = "increase_weight"
-                    recommended_weight = current_weight + weight_increment
-                    recommended_rep_target = exercise["target_rep_min"]
-
-                    reason = (
-                        f"Has completado todas las series en el máximo "
-                        f"del rango ({exercise['target_rep_max']} reps) "
-                        f"con al menos {exercise['target_rir']} RIR. "
-                        f"Sube {weight_increment:g} kg y vuelve al inicio "
-                        f"del rango ({exercise['target_rep_min']} reps)."
-                    )
-                else:
-                    recommendation = "maintain_weight"
-                    recommended_weight = current_weight
-                    recommended_rep_target = exercise["target_rep_max"]
-
-                    reason = (
-                        "Has alcanzado el máximo del rango con el RIR "
-                        "objetivo, pero este ejercicio no tiene un incremento "
-                        "de peso configurado."
-                    )
-
-            elif any_rir_too_low:
-                recommendation = "maintain_weight"
-                recommended_weight = current_weight
-                recommended_rep_target = exercise["target_rep_max"]
-
-                reason = (
-                    f"Has alcanzado el máximo de {exercise['target_rep_max']} "
-                    "repeticiones, pero alguna serie ha quedado por debajo "
-                    f"del RIR objetivo ({exercise['target_rir']}). "
-                    f"Mantén {current_weight:g} kg."
-                )
-
-            else:
-                recommendation = "maintain_weight"
-                recommended_weight = current_weight
-                recommended_rep_target = exercise["target_rep_max"]
-
-                reason = (
-                    f"Has alcanzado el máximo de {exercise['target_rep_max']} "
-                    "repeticiones, pero no hay RIR suficiente registrado "
-                    "para justificar una subida. Mantén la carga."
-                )
-
-        elif rep_progression_enabled:
-            next_rep_target = min(
-                max(reps) + 1,
-                exercise["target_rep_max"],
-            )
-
-            recommendation = "add_reps"
-            recommended_weight = current_weight
-            recommended_rep_target = next_rep_target
-
-            if any_rir_too_low:
-                reason = (
-                    f"Mantén {current_weight:g} kg. Busca progresar en "
-                    "repeticiones sin aumentar la carga porque alguna serie "
-                    "quedó por debajo del RIR objetivo."
-                )
-            else:
-                reason = (
-                    f"Mantén {current_weight:g} kg y busca aumentar "
-                    f"las repeticiones. Próximo objetivo: "
-                    f"{next_rep_target} reps por serie."
-                )
-
-        else:
-            recommendation = "maintain_weight"
-            recommended_weight = current_weight
-            recommended_rep_target = max(reps)
-
-            reason = (
-                f"La progresión por repeticiones está desactivada. "
-                f"Mantén {current_weight:g} kg."
-            )
+        last_performance = None
+        if result["last_workout"]:
+            last_sets = conn.execute(
+                """
+                SELECT set_number, weight_kg, reps, rir
+                FROM workout_sets
+                WHERE workout_log_id = ? AND exercise_id = ? AND is_warmup = 0
+                ORDER BY set_number
+                """,
+                (result["last_workout"]["workout_id"], exercise["exercise_id"]),
+            ).fetchall()
+            last_performance = {
+                "workout_id": result["last_workout"]["workout_id"],
+                "date": result["last_workout"]["date"],
+                "sets": [
+                    {
+                        "set_number": int(row["set_number"]),
+                        "weight_kg": float(row["weight_kg"] or 0),
+                        "reps": int(row["reps"] or 0),
+                        "rir": row["rir"],
+                    }
+                    for row in last_sets
+                ],
+            }
 
         recommendations.append(
             {
                 **base_response,
-                "recommendation": recommendation,
-                "recommended_weight_kg": recommended_weight,
-                "recommended_rep_target": recommended_rep_target,
-                "reason": reason,
-                "last_performance": {
-                    "workout_id": last_workout["id"],
-                    "date": last_workout["date"],
-                    "sets": [
-                        {
-                            "set_number": int(row["set_number"]),
-                            "weight_kg": float(row["weight_kg"]),
-                            "reps": int(row["reps"]),
-                            "rir": row["rir"],
-                        }
-                        for row in last_sets
-                    ],
-                },
+                "recommendation": "add_reps" if result["kind"] == "add_time" else result["kind"],
+                "recommended_weight_kg": result["weight_kg"],
+                "recommended_rep_target": result["reps"],
+                "reason": result["reason"],
+                "last_performance": last_performance,
             }
         )
 
@@ -4984,7 +4820,8 @@ class ExerciseCreateIn(BaseModel):
     steps: list[str] = []
     technical_cues: list[str] = []
     common_mistakes: list[str] = []
-    weight_increment_kg: float = 2.5
+    weight_increment_kg: float | None = None  # None: se deduce del equipo (Fase 6)
+    measure_type: str | None = None  # reps | time | bodyweight; None: se deduce del nombre/equipo
 
 
 @app.post("/api/exercises/draft")
@@ -5007,6 +4844,12 @@ def create_exercise(body: ExerciseCreateIn, current_user=Depends(get_authenticat
         conn.close()
         raise HTTPException(status_code=409, detail="Ese ejercicio ya existe")
     eid = str(uuid.uuid4())
+    measure_type = body.measure_type if body.measure_type in MEASURE_TYPES else infer_measure_type(name, body.equipment)
+    increment = (
+        body.weight_increment_kg
+        if body.weight_increment_kg is not None
+        else default_increment(body.equipment, None, measure_type)
+    )
     conn.execute(
         """INSERT INTO exercises (
             id, name, target_muscle, category, equipment, safety_notes, is_active,
@@ -5019,9 +4862,13 @@ def create_exercise(body: ExerciseCreateIn, current_user=Depends(get_authenticat
             json.dumps(body.steps, ensure_ascii=False),
             json.dumps(body.technical_cues, ensure_ascii=False),
             json.dumps(body.common_mistakes, ensure_ascii=False),
-            body.weight_increment_kg,
+            increment,
         ),
     )
+    try:
+        conn.execute("UPDATE exercises SET measure_type = ? WHERE id = ?", (measure_type, eid))
+    except Exception:
+        pass  # la columna la crea el arranque (ensure_progression_schema)
     conn.commit()
     conn.close()
-    return {"id": eid, "name": name}
+    return {"id": eid, "name": name, "measure_type": measure_type, "weight_increment_kg": increment}

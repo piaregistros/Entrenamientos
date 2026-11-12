@@ -127,7 +127,7 @@ def migrate_workout_logs_allow_expired(conn: sqlite3.Connection) -> bool:
     finally:
         conn.execute("PRAGMA foreign_keys = ON")
         conn.isolation_level = previous_isolation
-    logger.info("workout_logs migrada: ahora admite status='expired'")
+    logger.warning("MIGRACIÓN OK: workout_logs reconstruida, ahora admite status='expired'")
     return True
 
 

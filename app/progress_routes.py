@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from .auth import get_authenticated_user, resolve_target_user
 from .database import get_connection
+from .progression_db import compute_exercise_target, ensure_progress_extra_columns
 
 router = APIRouter(prefix="/api/progress", tags=["progress"])
 
@@ -40,6 +41,7 @@ def init_progress_db() -> None:
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(workout_logs)")}
     if "is_deload" not in cols:
         conn.execute("ALTER TABLE workout_logs ADD COLUMN is_deload INTEGER NOT NULL DEFAULT 0")
+    ensure_progress_extra_columns(conn)
     conn.commit()
     conn.close()
 
@@ -53,64 +55,55 @@ def _epley(weight: float, reps: int) -> float:
 
 
 def apply_progression(conn, user_id: str, workout_id: str, only: set | None = None) -> None:
-    sets = conn.execute(
-        """
-        SELECT ws.exercise_id, ws.weight_kg, ws.reps, ws.rir, ws.is_warmup, e.name
-        FROM workout_sets ws
-        JOIN exercises e ON e.id = ws.exercise_id
-        WHERE ws.workout_log_id = ?
-        """,
-        (workout_id,),
-    ).fetchall()
-    by_ex: dict[str, list] = {}
-    for s in sets:
-        by_ex.setdefault(s["exercise_id"], []).append(s)
+    """Guarda en exercise_progress el siguiente objetivo de cada ejercicio del entreno.
+
+    Fase 6: usa la MISMA doble progresión que /recommendations (app/progression.py).
+    Los entrenos de deload no mueven la progresión.
+    """
+    wl = conn.execute("SELECT status, is_deload FROM workout_logs WHERE id = ?", (workout_id,)).fetchone()
+    if wl and wl["is_deload"]:
+        return
+    exercise_ids = [
+        r["exercise_id"]
+        for r in conn.execute(
+            """
+            SELECT DISTINCT ws.exercise_id
+            FROM workout_sets ws
+            WHERE ws.workout_log_id = ? AND COALESCE(ws.is_warmup, 0) = 0
+            """,
+            (workout_id,),
+        )
+    ]
     now = datetime.utcnow().isoformat(timespec="seconds")
-    for eid, rows in by_ex.items():
+    ensure_progress_extra_columns(conn)
+    for eid in exercise_ids:
         if only is not None and eid not in only:
             continue
-        name = (rows[0]["name"] or "").strip().lower()
-        work = [r for r in rows if not r["is_warmup"]]
-        if not work or name == "plancha":
-            continue
-        routine = conn.execute(
-            """
-            SELECT re.target_rep_min, re.target_rep_max, re.target_rir, e.weight_increment_kg
-            FROM workout_logs wl
-            JOIN routine_exercises re ON re.routine_id = wl.routine_id AND re.exercise_id = ?
-            JOIN exercises e ON e.id = re.exercise_id
-            WHERE wl.id = ?
-            """,
-            (eid, workout_id),
-        ).fetchone()
-        last_w = max(r["weight_kg"] or 0 for r in work)
-        inc = 2.5
-        rep_min, rep_max, rir_target = 8, 12, 2
-        if routine:
-            rep_min = routine["target_rep_min"] or 8
-            rep_max = routine["target_rep_max"] or 12
-            rir_target = routine["target_rir"] if routine["target_rir"] is not None else 2
-            inc = routine["weight_increment_kg"] or 2.5
-        ok = all(
-            (r["reps"] or 0) >= rep_min and (r["rir"] is None or r["rir"] >= rir_target)
-            for r in work
+        result, _cfg = compute_exercise_target(
+            conn, user_id, eid, workout_id=workout_id, until_workout_id=workout_id
         )
-        if ok:
-            nxt = round(last_w + inc, 2)
-            reason = f"Cumpliste {rep_min}-{rep_max} a RIR {rir_target} → +{inc:g} kg"
-        else:
-            nxt = last_w
-            reason = "No se cumplió el objetivo → misma carga"
+        if result["kind"] == "start":
+            continue  # sin series de trabajo válidas: nada que guardar
         conn.execute(
             """
-            INSERT INTO exercise_progress (user_id, exercise_id, next_weight_kg, reason, updated_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO exercise_progress
+                (user_id, exercise_id, next_weight_kg, reason, updated_at,
+                 next_reps, kind, fail_streak, measure_type, source_workout_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(user_id, exercise_id) DO UPDATE SET
                 next_weight_kg=excluded.next_weight_kg,
                 reason=excluded.reason,
-                updated_at=excluded.updated_at
+                updated_at=excluded.updated_at,
+                next_reps=excluded.next_reps,
+                kind=excluded.kind,
+                fail_streak=excluded.fail_streak,
+                measure_type=excluded.measure_type,
+                source_workout_id=excluded.source_workout_id
             """,
-            (user_id, eid, nxt, reason, now),
+            (
+                user_id, eid, result["weight_kg"], result["reason"], now,
+                result["reps"], result["kind"], result["fail_streak"], result["measure_type"], workout_id,
+            ),
         )
 
 
@@ -136,6 +129,7 @@ def _ensure_progress_tables(conn) -> None:
             )
             """
         )
+    ensure_progress_extra_columns(conn)
 
 
 def recompute_exercise_progress(conn, user_id: str, exercise_ids) -> None:
@@ -164,7 +158,8 @@ def recompute_exercise_progress(conn, user_id: str, exercise_ids) -> None:
               AND wl.status = 'completed'
               AND ws.exercise_id = ?
               AND ws.is_warmup = 0
-            ORDER BY wl.date DESC, wl.id DESC
+              AND COALESCE(wl.is_deload, 0) = 0
+            ORDER BY datetime(wl.date) DESC, wl.id DESC
             LIMIT 1
             """,
             (user_id, eid),
@@ -363,13 +358,18 @@ def home(user_id: str, current_user=Depends(get_authenticated_user)):
                 (user_id, since28),
             )
         })
-    loads = {
-        r["exercise_id"]: {"next_weight_kg": r["next_weight_kg"], "reason": r["reason"]}
-        for r in conn.execute(
-            "SELECT exercise_id, next_weight_kg, reason FROM exercise_progress WHERE user_id=?",
-            (user_id,),
-        )
-    }
+    # Solo lectura (sin DDL en GET): las columnas nuevas las crea el arranque (init_progress_db).
+    loads = {}
+    for r in conn.execute("SELECT * FROM exercise_progress WHERE user_id=?", (user_id,)):
+        row = dict(r)
+        loads[row["exercise_id"]] = {
+            "next_weight_kg": row["next_weight_kg"],
+            "reason": row["reason"],
+            "next_reps": row.get("next_reps"),
+            "kind": row.get("kind"),
+            "measure_type": row.get("measure_type"),
+            "fail_streak": row.get("fail_streak") or 0,
+        }
     flags = [
         dict(r)
         for r in conn.execute(

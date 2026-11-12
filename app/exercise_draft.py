@@ -93,5 +93,5 @@ def draft_exercise(name: str) -> dict:
         "technical_cues": cues,
         "common_mistakes": mistakes,
         "source": source,
-        "weight_increment_kg": 2.5,
+        "weight_increment_kg": None,  # se deduce del equipo al crear (Fase 6)
     }

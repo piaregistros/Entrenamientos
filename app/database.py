@@ -1,5 +1,9 @@
 from pathlib import Path
+import logging
+import re
 import sqlite3
+
+logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
@@ -9,10 +13,131 @@ DB_PATH = DATA_DIR / "entrenamiento.db"
 def get_connection() -> sqlite3.Connection:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    conn = sqlite3.connect(DB_PATH)
+    # timeout=15: espera hasta 15 s a que se libere un bloqueo en vez de fallar
+    # con "database is locked" a los 5 s por defecto.
+    conn = sqlite3.connect(DB_PATH, timeout=15)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 15000")
+    try:
+        # WAL: los lectores no bloquean al escritor (y viceversa). El modo es
+        # persistente en el fichero; si ya es WAL esta sentencia no hace nada.
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
+    except sqlite3.OperationalError as exc:  # p. ej. BD en solo lectura
+        logger.warning("No se pudo activar WAL: %s", exc)
     return conn
+
+
+_STATUS_CHECK_RE = re.compile(
+    r"CHECK\s*\(\s*\"?status\"?\s+IN\s*\(([^)]*)\)\s*\)", re.IGNORECASE
+)
+
+
+def workout_logs_needs_expired_migration(conn: sqlite3.Connection) -> bool:
+    """True si workout_logs tiene un CHECK de status que no admite 'expired'."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='workout_logs'"
+    ).fetchone()
+    if not row or not row[0]:
+        return False
+    match = _STATUS_CHECK_RE.search(row[0])
+    if not match:
+        if "check" in row[0].lower() and "expired" not in row[0].lower():
+            logger.warning(
+                "workout_logs tiene un CHECK con formato inesperado; "
+                "no se migra automáticamente. Revisa .schema workout_logs"
+            )
+        return False
+    return "'expired'" not in match.group(1).lower()
+
+
+def migrate_workout_logs_allow_expired(conn: sqlite3.Connection) -> bool:
+    """Reconstruye workout_logs para que su CHECK admita status='expired'.
+
+    SQLite no permite modificar un CHECK, así que se sigue el procedimiento
+    oficial (crear tabla nueva, copiar, borrar la antigua, renombrar), todo
+    dentro de UNA transacción: si algo falla se hace ROLLBACK y la tabla
+    original queda intacta. Es idempotente: si el CHECK ya admite 'expired'
+    (o no hay CHECK) no hace nada. Devuelve True si migró.
+    """
+    if not workout_logs_needs_expired_migration(conn):
+        return False
+
+    old_sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='workout_logs'"
+    ).fetchone()[0]
+
+    def _add_expired(match: re.Match) -> str:
+        inner = match.group(1).rstrip()
+        return match.group(0).replace(inner, inner + ", 'expired'", 1)
+
+    new_sql = _STATUS_CHECK_RE.sub(_add_expired, old_sql, count=1)
+    new_sql, n = re.subn(
+        r'CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?["`\[]?workout_logs["`\]]?',
+        "CREATE TABLE workout_logs__new",
+        new_sql,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    if n != 1:
+        logger.warning("No se pudo reescribir el CREATE TABLE de workout_logs")
+        return False
+
+    columns = [r[1] for r in conn.execute("PRAGMA table_info(workout_logs)")]
+    column_list = ", ".join('"%s"' % c for c in columns)
+    extra_objects = [
+        r[0]
+        for r in conn.execute(
+            "SELECT sql FROM sqlite_master WHERE tbl_name='workout_logs' "
+            "AND type IN ('index','trigger') AND sql IS NOT NULL"
+        )
+    ]
+
+    conn.commit()
+    previous_isolation = conn.isolation_level
+    conn.isolation_level = None  # control manual de la transacción
+    try:
+        conn.execute("PRAGMA foreign_keys = OFF")  # no-op dentro de una transacción
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute("DROP TABLE IF EXISTS workout_logs__new")
+            conn.execute(new_sql)
+            before = conn.execute("SELECT COUNT(*) FROM workout_logs").fetchone()[0]
+            conn.execute(
+                f"INSERT INTO workout_logs__new ({column_list}) "
+                f"SELECT {column_list} FROM workout_logs"
+            )
+            copied = conn.execute("SELECT COUNT(*) FROM workout_logs__new").fetchone()[0]
+            if copied != before:
+                raise RuntimeError(
+                    f"Copia incompleta de workout_logs ({copied} de {before})"
+                )
+            conn.execute("DROP TABLE workout_logs")
+            conn.execute("ALTER TABLE workout_logs__new RENAME TO workout_logs")
+            for statement in extra_objects:
+                conn.execute(statement)
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    except Exception:
+        logger.exception("Migración workout_logs -> 'expired' fallida; se ha revertido")
+        return False
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.isolation_level = previous_isolation
+    logger.info("workout_logs migrada: ahora admite status='expired'")
+    return True
+
+
+def ensure_exercise_media_columns(conn: sqlite3.Connection) -> None:
+    """Columnas de ficha de ejercicio que antes se añadían dentro de un POST."""
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(exercises)")}
+    for col in ("steps", "technical_cues", "common_mistakes", "video_url"):
+        if col not in cols:
+            conn.execute(f"ALTER TABLE exercises ADD COLUMN {col} TEXT")
+    conn.commit()
 
 
 def init_db() -> None:
@@ -80,7 +205,7 @@ def init_db() -> None:
             status TEXT NOT NULL DEFAULT 'in_progress',
             FOREIGN KEY (user_id) REFERENCES users(id),
             FOREIGN KEY (routine_id) REFERENCES routines(id),
-            CHECK (status IN ('in_progress', 'completed', 'cancelled'))
+            CHECK (status IN ('in_progress', 'completed', 'cancelled', 'expired'))
         );
 
         CREATE TABLE IF NOT EXISTS workout_sets (
@@ -442,6 +567,9 @@ def init_db() -> None:
     )
 
     conn.commit()
+
+    ensure_exercise_media_columns(conn)
+    migrate_workout_logs_allow_expired(conn)
     conn.close()
 
 

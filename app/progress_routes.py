@@ -148,10 +148,8 @@ def _overlap(conn, last_workout_id: str | None, next_routine_id: str | None) -> 
 
 @router.get("/home")
 def home(user_id: str, current_user=Depends(get_authenticated_user)):
-    init_progress_db()
     user_id = resolve_target_user(current_user, user_id)
     conn = get_connection()
-    _ensure_session_label(conn)
     last = conn.execute(
         """
         SELECT id, routine_id, date, routine_id
@@ -288,7 +286,6 @@ def home(user_id: str, current_user=Depends(get_authenticated_user)):
 
 @router.get("/stats")
 def stats(user_id: str, current_user=Depends(get_authenticated_user)):
-    init_progress_db()
     user_id = resolve_target_user(current_user, user_id)
     since = (date.today() - timedelta(days=7)).isoformat()
     conn = get_connection()
@@ -338,7 +335,6 @@ class FlagIn(BaseModel):
 
 @router.post("/flag")
 def add_flag(body: FlagIn, user_id: str, current_user=Depends(get_authenticated_user)):
-    init_progress_db()
     user_id = resolve_target_user(current_user, user_id)
     conn = get_connection()
     conn.execute(
@@ -352,7 +348,6 @@ def add_flag(body: FlagIn, user_id: str, current_user=Depends(get_authenticated_
 
 @router.post("/flag/clear")
 def clear_flag(body: FlagIn, user_id: str, current_user=Depends(get_authenticated_user)):
-    init_progress_db()
     user_id = resolve_target_user(current_user, user_id)
     conn = get_connection()
     conn.execute(

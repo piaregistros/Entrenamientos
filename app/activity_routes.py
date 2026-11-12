@@ -66,7 +66,6 @@ def list_classes(current_user=Depends(get_authenticated_user)):
 
 @router.post("/log")
 def log_activity(body: LogIn, current_user=Depends(get_authenticated_user)):
-    init_activity_db()
     spec = class_by_id(body.class_id)
     if not spec:
         raise HTTPException(400, "Clase no reconocida")
@@ -92,7 +91,6 @@ def log_activity(body: LogIn, current_user=Depends(get_authenticated_user)):
 
 @router.get("/log")
 def list_logs(limit: int = 30, current_user=Depends(get_authenticated_user)):
-    init_activity_db()
     conn = get_connection()
     try:
         rows = conn.execute(
@@ -107,7 +105,6 @@ def list_logs(limit: int = 30, current_user=Depends(get_authenticated_user)):
 
 @router.patch("/log/{log_id}")
 def edit_log(log_id: str, body: LogEdit, current_user=Depends(get_authenticated_user)):
-    init_activity_db()
     conn = get_connection()
     try:
         row = conn.execute(
@@ -140,7 +137,6 @@ def edit_log(log_id: str, body: LogEdit, current_user=Depends(get_authenticated_
 
 @router.delete("/log/{log_id}")
 def delete_log(log_id: str, current_user=Depends(get_authenticated_user)):
-    init_activity_db()
     conn = get_connection()
     try:
         cur = conn.execute(

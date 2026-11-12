@@ -100,6 +100,41 @@ def _range_from_extra(conn, workout_id, exercise_id):
     ).fetchone()
 
 
+def _range_from_substitution(conn, workout_id, exercise_id):
+    """Fase 7: si en este entreno el ejercicio está haciendo de SUSTITUTO, hereda el rango objetivo
+    (series, reps, RIR) del hueco de la rutina que ocupa; la carga sigue siendo la suya."""
+    if not workout_id or not _table_exists(conn, "workout_exercise_substitutions"):
+        return None
+    return conn.execute(
+        """
+        SELECT re.target_rep_min, re.target_rep_max, re.target_rir
+        FROM workout_exercise_substitutions s
+        JOIN workout_logs wl ON wl.id = s.workout_log_id
+        JOIN routine_exercises re ON re.routine_id = wl.routine_id AND re.exercise_id = s.original_exercise_id
+        WHERE s.workout_log_id = ? AND s.substitute_exercise_id = ?
+        LIMIT 1
+        """,
+        (workout_id, exercise_id),
+    ).fetchone()
+
+
+def _range_from_user_substitutions(conn, user_id, exercise_id):
+    """Fase 7: sin entreno concreto (recálculo/rebuild), el rango del último hueco que ocupó como sustituto."""
+    if not user_id or not _table_exists(conn, "workout_exercise_substitutions"):
+        return None
+    return conn.execute(
+        """
+        SELECT re.target_rep_min, re.target_rep_max, re.target_rir
+        FROM workout_exercise_substitutions s
+        JOIN workout_logs wl ON wl.id = s.workout_log_id
+        JOIN routine_exercises re ON re.routine_id = wl.routine_id AND re.exercise_id = s.original_exercise_id
+        WHERE wl.user_id = ? AND s.substitute_exercise_id = ?
+        ORDER BY datetime(wl.date) DESC, wl.id DESC LIMIT 1
+        """,
+        (user_id, exercise_id),
+    ).fetchone()
+
+
 def _range_from_user_routines(conn, user_id, exercise_id):
     if not user_id:
         return None
@@ -127,8 +162,10 @@ def build_exercise_config(conn, exercise_id: str, routine_id=None, workout_id=No
         routine_id = wl["routine_id"] if wl else None
     target = (
         _range_from_routine(conn, routine_id, exercise_id)
+        or _range_from_substitution(conn, workout_id, exercise_id)
         or _range_from_extra(conn, workout_id, exercise_id)
         or _range_from_user_routines(conn, user_id, exercise_id)
+        or _range_from_user_substitutions(conn, user_id, exercise_id)
     )
     ex["rep_min"] = target["target_rep_min"] if target else None
     ex["rep_max"] = target["target_rep_max"] if target else None

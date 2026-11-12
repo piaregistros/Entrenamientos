@@ -18,6 +18,18 @@ from .progression import MEASURE_TYPES, default_increment, infer_measure_type
 from .workout_extras import router as workout_extras_router, load_extra_exercises, load_substitutions
 from .exercise_sheets import ensure_exercise_sheets, attach_sheet_fields
 from .exercise_info_routes import router as exercise_info_router
+from .substitutions import (
+    router as substitutions_router,
+    ensure_substitutions,
+    record_substitution_pref,
+    apply_always_substitutions,
+    enrich_substitutions,
+    recommendation_item,
+    score_pair,
+    slot_for,
+    EXERCISE_REC_COLUMNS,
+)
+from .exercise_crud import router as exercise_crud_router, ensure_crud_schema, apply_data_migrations
 from .auth import (
     get_authenticated_user,
     require_admin,
@@ -45,6 +57,8 @@ app.include_router(progress_router)
 app.include_router(onboarding_router)
 app.include_router(workout_extras_router)
 app.include_router(exercise_info_router)
+app.include_router(substitutions_router)
+app.include_router(exercise_crud_router)
 
 app.add_api_route(
     "/api/workouts/in-progress",
@@ -160,6 +174,23 @@ def startup_progression():
         ensure_progression_schema(conn)
     except Exception:
         _logging.getLogger(__name__).exception("No se pudo aplicar el esquema de progresión; la app sigue arrancando")
+    finally:
+        conn.close()
+
+
+@app.on_event("startup")
+def startup_fase7():
+    # Fase 7: sustituciones (tablas, parejas curadas y automáticas), columnas de CRUD y migraciones
+    # de datos idempotentes. Handler propio, después de los de las fases 5 y 6.
+    import logging as _logging
+
+    conn = get_connection()
+    try:
+        ensure_crud_schema(conn)
+        ensure_substitutions(conn)
+        apply_data_migrations(conn)
+    except Exception:
+        _logging.getLogger(__name__).exception("No se pudo aplicar la Fase 7 (sustituciones/CRUD); la app sigue arrancando")
     finally:
         conn.close()
 
@@ -3272,7 +3303,9 @@ def list_exercises(
             contraindications,
             weight_increment_kg,
             progression_type,
-            rep_progression_enabled
+            rep_progression_enabled,
+            created_by,
+            is_custom
         FROM exercises
         WHERE 1 = 1
     """
@@ -3299,6 +3332,11 @@ def list_exercises(
     rows = conn.execute(query, params).fetchall()
 
     exercises = attach_sheet_fields(conn, [dict(row) for row in rows])
+    for exercise in exercises:
+        exercise["is_custom"] = bool(exercise.get("is_custom"))
+        exercise["can_edit"] = current_user["role"] == "admin" or (
+            exercise["is_custom"] and exercise.get("created_by") == current_user["id"]
+        )
 
     conn.close()
 
@@ -3524,6 +3562,15 @@ def create_workout(
         ),
     )
 
+    # Fase 7: las sustituciones marcadas «usar siempre» en esta rutina se aplican al empezar
+    # (solo en entrenos NUEVOS; el early-return de arriba reutiliza el que ya está en curso).
+    applied = apply_always_substitutions(conn, workout_id, user_id, workout.routine_id)
+    substitutions = (
+        enrich_substitutions(conn, user_id, workout_id, load_substitutions(conn, workout_id))
+        if applied
+        else []
+    )
+
     conn.commit()
     conn.close()
 
@@ -3533,6 +3580,7 @@ def create_workout(
         "routine_id": workout.routine_id,
         "date": now,
         "status": "in_progress",
+        "substitutions": substitutions,
     }
 
 
@@ -3541,6 +3589,7 @@ class WorkoutExerciseSubstitutionCreate(BaseModel):
     original_exercise_id: str
     substitute_exercise_id: str
     reason: str | None = None
+    always_in_routine: bool | None = None  # Fase 7: «usar siempre esta sustitución en esta rutina»
 
 
 @app.post("/api/workouts/{workout_id}/substitute-exercise")
@@ -3661,15 +3710,22 @@ def substitute_workout_exercise(
         )
 
     # -----------------------------------------------------
-    # Comprobar que existe una sustitución configurada
+    # Fase 7: se puede sustituir por CUALQUIER ejercicio activo del catálogo
+    # (antes solo por las parejas curadas). La pareja curada, si existe, aporta
+    # el motivo; si no, se calcula por parecido.
     # -----------------------------------------------------
 
+    original_meta = conn.execute(
+        "SELECT * FROM exercises WHERE id = ?", (data.original_exercise_id,)
+    ).fetchone()
+    substitute_meta = conn.execute(
+        "SELECT * FROM exercises WHERE id = ?", (data.substitute_exercise_id,)
+    ).fetchone()
+    computed_score, computed_level, computed_reason = score_pair(
+        dict(original_meta), dict(substitute_meta)
+    )
     substitution = conn.execute("""
-        SELECT
-            priority,
-            reason,
-            same_muscle,
-            same_movement_pattern
+        SELECT priority, reason, same_muscle, same_movement_pattern
         FROM exercise_substitutions
         WHERE exercise_id = ?
           AND alternative_exercise_id = ?
@@ -3678,12 +3734,24 @@ def substitute_workout_exercise(
         data.original_exercise_id,
         data.substitute_exercise_id,
     )).fetchone()
+    if substitution is None:
+        substitution = {
+            "priority": 1 if computed_score >= 85 else 2 if computed_score >= 65 else 3,
+            "reason": computed_reason or "Sustitución elegida por el usuario",
+            "same_muscle": computed_level in ("pattern", "muscle"),
+            "same_movement_pattern": computed_level == "pattern",
+        }
 
-    if not substitution:
+    # El sustituto no puede ser ya otro ejercicio de la rutina.
+    already_in_routine = conn.execute(
+        "SELECT 1 FROM routine_exercises WHERE routine_id = ? AND exercise_id = ?",
+        (workout["routine_id"], data.substitute_exercise_id),
+    ).fetchone()
+    if already_in_routine:
         conn.close()
         raise HTTPException(
-            status_code=400,
-            detail="El ejercicio alternativo no está configurado como sustitución válida"
+            status_code=409,
+            detail="Ese ejercicio ya forma parte de la rutina"
         )
 
     # -----------------------------------------------------
@@ -3732,6 +3800,12 @@ def substitute_workout_exercise(
         data.substitute_exercise_id,
         reason,
     ))
+
+    # Fase 7: recordar la elección (y, si se pide, fijarla para esta rutina).
+    record_substitution_pref(
+        conn, user_id, data.original_exercise_id, data.substitute_exercise_id,
+        routine_id=workout["routine_id"], always=data.always_in_routine,
+    )
 
     conn.commit()
 
@@ -3784,7 +3858,27 @@ def substitute_workout_exercise(
         "same_movement_pattern": bool(
             substitution["same_movement_pattern"]
         ),
+        "always_in_routine": bool(data.always_in_routine),
     }
+
+    # Fase 7: historial y objetivo siguiente DEL SUSTITUTO (con el rango de series/reps del hueco).
+    slot = slot_for(conn, workout["routine_id"], data.original_exercise_id)
+    substitute_row = conn.execute(
+        f"SELECT {EXERCISE_REC_COLUMNS} FROM exercises e WHERE e.id = ?",
+        (data.substitute_exercise_id,),
+    ).fetchone()
+    recommendation = recommendation_item(
+        conn, user_id, workout["routine_id"], workout_id, slot, substitute_row
+    )
+    recommendation["original_exercise_id"] = data.original_exercise_id
+    recommendation["substituted"] = True
+    result["recommendation"] = recommendation
+    result["last_performance"] = (
+        recommendation["last_performance"]["sets"]
+        if recommendation["last_performance"]
+        else None
+    )
+    result["last_performance_detail"] = recommendation["last_performance"]
 
     conn.close()
 
@@ -4351,8 +4445,14 @@ def delete_workout_set(
 def get_routine_recommendations(
     routine_id: str,
     user_id: str,
+    workout_id: str | None = None,
     current_user = Depends(get_authenticated_user),
 ):
+    """Objetivo siguiente de cada hueco de la rutina.
+
+    Fase 7: con ``workout_id`` los huecos sustituidos en ese entreno devuelven el objetivo del
+    EJERCICIO SUSTITUTO (su carga e historial, con el rango de series/reps del hueco).
+    """
     user_id = resolve_target_user(current_user, user_id)
     conn = get_connection()
 
@@ -4370,6 +4470,23 @@ def get_routine_recommendations(
     if routine is None:
         conn.close()
         raise HTTPException(status_code=404, detail="Rutina no encontrada")
+
+    substitutes = {}
+    if workout_id:
+        workout_row = conn.execute(
+            "SELECT id FROM workout_logs WHERE id = ? AND user_id = ?", (workout_id, user_id)
+        ).fetchone()
+        if workout_row is None:
+            conn.close()
+            raise HTTPException(status_code=404, detail="Entrenamiento no encontrado")
+        substitutes = {
+            r["original_exercise_id"]: r["substitute_exercise_id"]
+            for r in conn.execute(
+                "SELECT original_exercise_id, substitute_exercise_id FROM workout_exercise_substitutions "
+                "WHERE workout_log_id = ?",
+                (workout_id,),
+            )
+        }
 
     exercises = conn.execute(
         """
@@ -4401,63 +4518,24 @@ def get_routine_recommendations(
     recommendations = []
 
     for exercise in exercises:
+        effective_id = substitutes.get(exercise["exercise_id"], exercise["exercise_id"])
+        effective = conn.execute(
+            f"SELECT {EXERCISE_REC_COLUMNS} FROM exercises e WHERE e.id = ?", (effective_id,)
+        ).fetchone() or conn.execute(
+            f"SELECT {EXERCISE_REC_COLUMNS} FROM exercises e WHERE e.id = ?", (exercise["exercise_id"],)
+        ).fetchone()
         # Fase 6: la misma doble progresión que apply_progression (app/progression.py)
-        result, _config = compute_exercise_target(
-            conn, user_id, exercise["exercise_id"], routine_id=routine_id
+        item = recommendation_item(
+            conn, user_id, routine_id, workout_id,
+            {"order": exercise["order"], "target_sets": exercise["target_sets"],
+             "target_rep_min": exercise["target_rep_min"], "target_rep_max": exercise["target_rep_max"],
+             "target_rir": exercise["target_rir"]},
+            effective,
         )
-
-        base_response = {
-            "exercise_id": exercise["exercise_id"],
-            "exercise_name": exercise["name"],
-            "order": exercise["order"],
-            "target_sets": exercise["target_sets"],
-            "target_rep_min": exercise["target_rep_min"],
-            "target_rep_max": exercise["target_rep_max"],
-            "target_rir": exercise["target_rir"],
-            "weight_increment_kg": exercise["weight_increment_kg"],
-            "progression_type": exercise["progression_type"],
-            "rep_progression_enabled": bool(exercise["rep_progression_enabled"]),
-            "measure_type": result["measure_type"],
-            "unit": result["unit"],
-            "increment_kg": result["increment_kg"],
-            "fail_streak": result["fail_streak"],
-        }
-
-        last_performance = None
-        if result["last_workout"]:
-            last_sets = conn.execute(
-                """
-                SELECT set_number, weight_kg, reps, rir
-                FROM workout_sets
-                WHERE workout_log_id = ? AND exercise_id = ? AND is_warmup = 0
-                ORDER BY set_number
-                """,
-                (result["last_workout"]["workout_id"], exercise["exercise_id"]),
-            ).fetchall()
-            last_performance = {
-                "workout_id": result["last_workout"]["workout_id"],
-                "date": result["last_workout"]["date"],
-                "sets": [
-                    {
-                        "set_number": int(row["set_number"]),
-                        "weight_kg": float(row["weight_kg"] or 0),
-                        "reps": int(row["reps"] or 0),
-                        "rir": row["rir"],
-                    }
-                    for row in last_sets
-                ],
-            }
-
-        recommendations.append(
-            {
-                **base_response,
-                "recommendation": "add_reps" if result["kind"] == "add_time" else result["kind"],
-                "recommended_weight_kg": result["weight_kg"],
-                "recommended_rep_target": result["reps"],
-                "reason": result["reason"],
-                "last_performance": last_performance,
-            }
-        )
+        if effective["id"] != exercise["exercise_id"]:
+            item["original_exercise_id"] = exercise["exercise_id"]
+            item["substituted"] = True
+        recommendations.append(item)
 
     conn.close()
 
@@ -4467,90 +4545,6 @@ def get_routine_recommendations(
         "user_id": routine["user_id"],
         "recommendations": recommendations,
     }
-
-
-@app.get("/api/exercises/{exercise_id}/substitutions")
-def get_exercise_substitutions(
-    exercise_id: str,
-    user_id: str,
-    current_user = Depends(get_authenticated_user),
-):
-    user_id = resolve_target_user(current_user, user_id)
-    conn = get_connection()
-
-    exercise = conn.execute("""
-        SELECT id, name, equipment, target_muscle, category
-        FROM exercises
-        WHERE id = ? AND is_active = 1
-    """, (exercise_id,)).fetchone()
-
-    if not exercise:
-        conn.close()
-        raise HTTPException(status_code=404, detail="Ejercicio no encontrado")
-
-    # Comprobar usuario
-    user = conn.execute(
-        "SELECT id FROM users WHERE id = ?",
-        (user_id,)
-    ).fetchone()
-
-    if not user:
-        conn.close()
-        raise HTTPException(status_code=404, detail="Usuario no encontrado")
-
-    rows = conn.execute("""
-        SELECT
-            es.alternative_exercise_id,
-            e.name,
-            e.target_muscle,
-            e.category,
-            e.equipment,
-            e.safety_notes,
-            e.instructions,
-            e.contraindications,
-            es.priority,
-            es.reason,
-            es.same_muscle,
-            es.same_movement_pattern
-        FROM exercise_substitutions es
-        JOIN exercises e
-          ON e.id = es.alternative_exercise_id
-        WHERE es.exercise_id = ?
-          AND es.is_active = 1
-          AND e.is_active = 1
-        ORDER BY
-            es.priority ASC,
-            es.same_movement_pattern DESC,
-            es.same_muscle DESC,
-            e.name ASC
-    """, (exercise_id,)).fetchall()
-
-    result = []
-
-    for row in rows:
-        result.append({
-            "exercise_id": row["alternative_exercise_id"],
-            "name": row["name"],
-            "target_muscle": row["target_muscle"],
-            "category": row["category"],
-            "equipment": row["equipment"],
-            "safety_notes": row["safety_notes"],
-            "instructions": row["instructions"],
-            "contraindications": row["contraindications"],
-            "priority": row["priority"],
-            "reason": row["reason"],
-            "same_muscle": bool(row["same_muscle"]),
-            "same_movement_pattern": bool(row["same_movement_pattern"]),
-        })
-
-    conn.close()
-
-    return {
-        "exercise_id": exercise["id"],
-        "exercise_name": exercise["name"],
-        "substitutions": result,
-    }
-
 
 
 @app.get("/api/workouts/{workout_id}")
@@ -4655,7 +4649,9 @@ def get_workout(
     # Ejercicios extra y sustituciones de la sesión: sin esto, al recargar o
     # salir y continuar la lista se reconstruía solo desde la rutina.
     extra_exercises = load_extra_exercises(conn, workout_id)
-    substitutions = load_substitutions(conn, workout_id)
+    substitutions = enrich_substitutions(
+        conn, user_id, workout_id, load_substitutions(conn, workout_id)
+    )
 
     conn.close()
 
@@ -4869,6 +4865,11 @@ def create_exercise(body: ExerciseCreateIn, current_user=Depends(get_authenticat
         conn.execute("UPDATE exercises SET measure_type = ? WHERE id = ?", (measure_type, eid))
     except Exception:
         pass  # la columna la crea el arranque (ensure_progression_schema)
+    try:
+        # Fase 7: ejercicio propio, con dueño.
+        conn.execute("UPDATE exercises SET created_by = ?, is_custom = 1 WHERE id = ?", (current_user["id"], eid))
+    except Exception:
+        pass  # columnas creadas en el arranque (ensure_crud_schema)
     conn.commit()
     conn.close()
     return {"id": eid, "name": name, "measure_type": measure_type, "weight_increment_kg": increment}

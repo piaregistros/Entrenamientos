@@ -12,4 +12,6 @@ app/*.db
 
 # Backups temporales creados durante desarrollo
 *.pre-*
+*.backup-*
+*.bak
 uvicorn.log

@@ -1,0 +1,15 @@
+[Unit]
+Description=Copia diaria de la base de datos de entrenamientos
+Documentation=file:/opt/entrenamiento/deploy/entrenamiento-backup.service
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/entrenamiento
+Environment=ENTRENAMIENTO_DB=/opt/entrenamiento/data/entrenamiento.db
+Environment=ENTRENAMIENTO_BACKUP_DIR=/root/backups/auto
+ExecStart=/opt/entrenamiento/.venv/bin/python -m app.backup
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from .auth import get_authenticated_user, resolve_target_user
 from .database import get_connection
 from .progression_db import compute_exercise_target, ensure_progress_extra_columns
+from .stagnation import list_stagnated_exercises
 
 router = APIRouter(prefix="/api/progress", tags=["progress"])
 
@@ -377,6 +378,7 @@ def home(user_id: str, current_user=Depends(get_authenticated_user)):
             (user_id,),
         )
     ]
+    stagnation = list_stagnated_exercises(conn, user_id)
     conn.close()
     return {
         "last_workout_id": last["id"] if last else None,
@@ -393,7 +395,20 @@ def home(user_id: str, current_user=Depends(get_authenticated_user)):
         "streak_28": streak28,
         "loads": loads,
         "flags": flags,
+        "stagnation": stagnation,
     }
+
+
+@router.get("/stagnation")
+def stagnation_alerts(user_id: str, current_user=Depends(get_authenticated_user)):
+    """Ejercicios del usuario con 3+ sesiones sin progreso o racha de fallos creciente."""
+    user_id = resolve_target_user(current_user, user_id)
+    conn = get_connection()
+    try:
+        items = list_stagnated_exercises(conn, user_id)
+    finally:
+        conn.close()
+    return {"items": items, "count": len(items)}
 
 
 @router.get("/stats")

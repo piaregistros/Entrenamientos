@@ -1,0 +1,11 @@
+[Unit]
+Description=Temporizador diario de copia de la BD de entrenamientos
+
+[Timer]
+OnCalendar=*-*-* 04:00:00
+Persistent=true
+RandomizedDelaySec=10min
+Unit=entrenamiento-backup.service
+
+[Install]
+WantedBy=timers.target

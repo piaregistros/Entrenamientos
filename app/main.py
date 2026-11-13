@@ -30,6 +30,8 @@ from .substitutions import (
     EXERCISE_REC_COLUMNS,
 )
 from .exercise_crud import router as exercise_crud_router, ensure_crud_schema, apply_data_migrations
+from .push_routes import router as push_router
+from .push import init_push_db, start_scheduler, stop_scheduler
 from .auth import (
     get_authenticated_user,
     require_admin,
@@ -59,6 +61,7 @@ app.include_router(workout_extras_router)
 app.include_router(exercise_info_router)
 app.include_router(substitutions_router)
 app.include_router(exercise_crud_router)
+app.include_router(push_router)
 
 app.add_api_route(
     "/api/workouts/in-progress",
@@ -193,6 +196,30 @@ def startup_fase7():
         _logging.getLogger(__name__).exception("No se pudo aplicar la Fase 7 (sustituciones/CRUD); la app sigue arrancando")
     finally:
         conn.close()
+
+
+@app.on_event("startup")
+def startup_fase10_push():
+    # Fase 10: tablas de suscripciones y avisos programados (DDL solo al arrancar).
+    try:
+        init_push_db()
+    except Exception:
+        logger.exception("No se pudo aplicar el esquema de avisos push; la app sigue arrancando")
+
+
+@app.on_event("startup")
+async def startup_fase10_scheduler():
+    # Bucle en memoria que revisa scheduled_pushes cada 1-2 s. Sobrevive un reinicio
+    # porque los avisos viven en la base de datos.
+    try:
+        start_scheduler()
+    except Exception:
+        logger.exception("No se pudo arrancar el programador de avisos push")
+
+
+@app.on_event("shutdown")
+async def shutdown_fase10_scheduler():
+    stop_scheduler()
 
 
 @app.get("/api/routines")

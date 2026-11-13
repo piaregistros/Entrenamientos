@@ -12,6 +12,8 @@ from .auth import get_authenticated_user, resolve_target_user
 from .database import get_connection
 from .progression_db import compute_exercise_target, ensure_progress_extra_columns
 from .stagnation import list_stagnated_exercises
+from .charts import exercise_history, weekly_volume, RANGE_DAYS, clamp_weeks
+from .warmup import suggest_warmup
 
 router = APIRouter(prefix="/api/progress", tags=["progress"])
 
@@ -451,6 +453,67 @@ def stats(user_id: str, current_user=Depends(get_authenticated_user)):
     return {
         "volume_7d": [dict(v) for v in volume],
         "e1rm": sorted(best.values(), key=lambda x: x["e1rm"], reverse=True)[:12],
+    }
+
+
+
+@router.get("/exercise/{exercise_id}")
+def exercise_chart(exercise_id: str, user_id: str, range: str = "12w", current_user=Depends(get_authenticated_user)):
+    """Historial de 1RM estimado (Epley), peso máximo y volumen por sesión."""
+    user_id = resolve_target_user(current_user, user_id)
+    range_key = range if range in RANGE_DAYS else "12w"
+    conn = get_connection()
+    try:
+        data = exercise_history(conn, user_id, exercise_id, range_key)
+    finally:
+        conn.close()
+    if data is None:
+        raise HTTPException(status_code=404, detail="Ejercicio no encontrado")
+    return data
+
+
+@router.get("/volume")
+def volume_chart(user_id: str, weeks: int = 12, current_user=Depends(get_authenticated_user)):
+    """Volumen semanal por grupo muscular (series efectivas) y equilibrio."""
+    user_id = resolve_target_user(current_user, user_id)
+    conn = get_connection()
+    try:
+        data = weekly_volume(conn, user_id, clamp_weeks(weeks))
+    finally:
+        conn.close()
+    return data
+
+
+@router.get("/warmup")
+def warmup_preview(
+    user_id: str,
+    exercise_id: str,
+    weight_kg: float,
+    current_user=Depends(get_authenticated_user),
+):
+    """Series de aproximación sugeridas para un peso de trabajo (el usuario autenticado)."""
+    resolve_target_user(current_user, user_id)
+    conn = get_connection()
+    try:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(exercises)")}
+        select = ", ".join(
+            c for c in ("id", "name", "equipment", "exercise_type", "measure_type",
+                        "weight_increment_kg", "category", "target_muscle")
+            if c in cols
+        )
+        ex = conn.execute(f"SELECT {select} FROM exercises WHERE id = ?", (exercise_id,)).fetchone()
+    finally:
+        conn.close()
+    if ex is None:
+        raise HTTPException(status_code=404, detail="Ejercicio no encontrado")
+    exd = {k: ex[k] for k in ex.keys()}
+    sets = suggest_warmup(exd, weight_kg)
+    return {
+        "exercise_id": exercise_id,
+        "name": exd.get("name"),
+        "working_weight_kg": weight_kg,
+        "sets": sets,
+        "count": len(sets),
     }
 
 

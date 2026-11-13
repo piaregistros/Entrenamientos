@@ -42,14 +42,18 @@ def _norm(value) -> str:
 
 
 def equipment_class(equipment) -> str:
-    """barbell | dumbbell | machine | cable | bodyweight | other (por el primer equipo citado)."""
+    """barbell | dumbbell | kettlebell | machine | cable | bodyweight | other (por el primer equipo citado)."""
     first = re.split(r"\s+o\s+|/|,|\+", _norm(equipment))[0].strip()
     if not first:
         return "other"
     if first.startswith("peso corporal") or first.startswith("bodyweight") or first.startswith("calistenia"):
         return "bodyweight"
-    if first.startswith("mancuerna") or first.startswith("kettlebell") or first.startswith("pesa rusa"):
+    if first.startswith("kettlebell") or first.startswith("pesa rusa"):
+        return "kettlebell"
+    if first.startswith("mancuerna"):
         return "dumbbell"
+    if first.startswith("trap") or first.startswith("hex") or first.startswith("landmine") or first.startswith("bear bar"):
+        return "barbell"
     if first.startswith("barra") or first.startswith("smith") or first.startswith("multipower"):
         return "barbell"
     if first.startswith("polea") or first.startswith("cable"):
@@ -79,8 +83,10 @@ def default_increment(equipment, exercise_type=None, measure_type=None) -> float
         return 0.0 if _norm(exercise_type) == "core" else 2.5   # lastre (dominadas, fondos...)
     if cls == "barbell":
         return 2.5
+    if cls == "kettlebell":
+        return 4.0                                 # hueco típico; next_target usa la lista de pesos
     if cls == "dumbbell":
-        return 1.0 if isolation else 2.0           # peso por mancuerna
+        return 1.0 if isolation else 2.0           # peso por mancuerna (en casa se puede pisar a 2,5)
     if cls in ("machine", "cable"):
         return 2.5 if isolation else 5.0           # paso de la placa
     return 2.5
@@ -113,8 +119,55 @@ def round_to_step(value: float, step: float) -> float:
     return round(value, 2)
 
 
-def deload_weight(weight: float, increment: float) -> float:
-    """-10 % redondeado al paso de carga, siempre al menos un paso por debajo."""
+def normalize_weight_steps(steps) -> list[float]:
+    """Lista ordenada y única de pesos disponibles (p. ej. kettlebells 8, 10, 12…)."""
+    out = []
+    for s in steps or []:
+        try:
+            v = float(s)
+        except (TypeError, ValueError):
+            continue
+        if v > 0:
+            out.append(round(v, 2))
+    return sorted(set(out))
+
+
+def next_step_weight(current: float, increment: float, steps=None):
+    """Siguiente peso al subir. None si no hay uno más pesado en la lista fija."""
+    fixed = normalize_weight_steps(steps)
+    if fixed:
+        for s in fixed:
+            if s > current + 1e-6:
+                return s
+        return None
+    step = increment if increment and increment > 0 else 0.0
+    if step <= 0:
+        return None
+    return round(current + step, 2)
+
+
+def previous_step_weight(current: float, increment: float, steps=None) -> float:
+    """Peso de descarga: anterior de la lista, o -10 % al paso de carga."""
+    fixed = normalize_weight_steps(steps)
+    if fixed:
+        lighter = [s for s in fixed if s < current - 1e-6]
+        if lighter:
+            return lighter[-1]
+        return max(0.0, lighter[0] if False else 0.0)
+    return deload_weight(current, increment, steps=None)
+
+
+def deload_weight(weight: float, increment: float, steps=None) -> float:
+    """-10 % redondeado al paso de carga (o a la kettlebell anterior), siempre al menos un paso por debajo."""
+    fixed = normalize_weight_steps(steps)
+    if fixed:
+        target = weight * DELOAD_FACTOR
+        lighter = [s for s in fixed if s < weight - 1e-6]
+        if not lighter:
+            return max(0.0, round(weight * DELOAD_FACTOR, 2))
+        # El más cercano por debajo del 90 %, o el inmediatamente anterior si el 90 % no baja de peso.
+        below_target = [s for s in lighter if s <= target + 1e-6]
+        return (below_target[-1] if below_target else lighter[-1])
     step = increment if increment and increment > 0 else 2.5
     lighter = round_to_step(weight * DELOAD_FACTOR, step)
     if lighter >= weight:
@@ -194,6 +247,7 @@ def next_target(ex: dict, sessions: list[list[dict]]) -> dict:
     unit_txt = "s" if measure == "time" else " reps"
     rep_min, rep_max, rir_target = _resolve_range(ex, measure)
     inc = resolve_increment(ex)
+    steps = normalize_weight_steps(ex.get("weight_steps"))
 
     evaluated = [e for e in (_evaluate(s) for s in (sessions or [])[:2]) if e]
     if not evaluated:
@@ -223,7 +277,7 @@ def next_target(ex: dict, sessions: list[list[dict]]) -> dict:
                                f"Fallaste 2 sesiones seguidas (menos de {rep_min} s): baja a {rep_min} s y recupera la técnica.",
                                measure, unit, inc, fail_streak)
             if loaded:
-                lighter = deload_weight(w, inc)
+                lighter = deload_weight(w, inc, steps)
                 if lighter < w:
                     return _result("deload", lighter, rep_min,
                                    f"Fallaste 2 sesiones seguidas con {kg} → baja a {fmt_num(lighter)} kg (deload) y vuelve a {rep_min} reps.",
@@ -249,9 +303,23 @@ def next_target(ex: dict, sessions: list[list[dict]]) -> dict:
                 reason = (f"Llegaste a {rep_max} reps, pero alguna serie quedó por debajo de {rir_target} RIR. "
                           f"Mantén {kg if loaded else 'tu peso corporal'} hasta dejar {rir_target} RIR.")
             return _result("maintain_weight", w, rep_max, reason, measure, unit, inc)
-        if inc > 0:
-            new_w = round(w + inc, 2)
-            if loaded:
+        if inc > 0 or steps:
+            new_w = next_step_weight(w, inc, steps)
+            if new_w is None:
+                if measure == "time":
+                    reason = (f"Llegaste a {rep_max} s y no hay un peso mayor disponible. "
+                              f"Añade una serie o una variante más difícil.")
+                elif steps:
+                    reason = (f"Llegaste a {rep_max}{unit_txt} en todas las series, pero ya usas "
+                              f"la kettlebell más pesada ({fmt_num(w)} kg). Añade una serie o más pausa.")
+                else:
+                    reason = (f"Llegaste a {rep_max}{unit_txt} en todas las series: añade una serie, "
+                              f"más pausa o una variante más difícil.")
+                return _result("maintain_weight", w, rep_max, reason, measure, unit, inc)
+            if steps:
+                reason = (f"Llegaste a {rep_max}{unit_txt} en todas las series → pasa a la kettlebell "
+                          f"de {fmt_num(new_w)} kg. Vuelve a {rep_min}{unit_txt}.")
+            elif loaded:
                 reason = (f"Llegaste a {rep_max}{unit_txt} en todas las series → +{fmt_num(inc)} kg. "
                           f"Vuelve a {rep_min}{unit_txt}.")
             else:

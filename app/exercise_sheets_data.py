@@ -856,3 +856,12 @@ SHEETS["Elevación de rodillas"] = _s(
     "Si te cuelgas de una barra, activa los hombros para protegerlos y evita tirones del agarre.",
     "Dolor de hombro o lumbar al colgarse o al enrollar la pelvis.",
 )
+
+
+try:
+    from .casa_sheets import CASA_SHEETS
+except ImportError:
+    from casa_sheets import CASA_SHEETS
+
+SHEETS.update(CASA_SHEETS)
+

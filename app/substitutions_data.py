@@ -112,3 +112,12 @@ CURATED_PAIRS: list[tuple[str, str, int, str]] = [
     ("Plancha", "Elevación de rodillas", 60, "Core con peso corporal."),
     ("Pallof press", "Crunch en polea", 55, "Core con polea, de anti-rotación a flexión de columna."),
 ]
+
+
+try:
+    from .casa_catalog import CASA_CURATED_PAIRS
+except ImportError:
+    from casa_catalog import CASA_CURATED_PAIRS
+
+CURATED_PAIRS = list(CURATED_PAIRS) + list(CASA_CURATED_PAIRS)
+

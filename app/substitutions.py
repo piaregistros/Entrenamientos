@@ -114,8 +114,12 @@ def muscle_tokens(text) -> tuple[set[str], set[str]]:
 _EQUIP_KEYS = [
     ("mancuerna", "mancuernas"), ("maquina", "maquina"), ("polea", "polea"),
     ("barra", "barra"), ("peso corporal", "peso corporal"), ("banco", "banco"),
+    ("kettlebell", "kettlebells"), ("pesa rusa", "kettlebells"),
+    ("landmine", "landmine"), ("trap bar", "trap_bar"), ("trx", "trx"),
+    ("goma", "gomas"), ("banda", "gomas"),
 ]
 EQUIPMENT_FAMILIES = ["mancuernas", "maquina", "polea", "barra", "peso corporal"]
+HOME_FIT_BONUS = 12
 
 
 def equipment_families(value) -> set[str]:
@@ -463,6 +467,15 @@ def rank_substitutes(conn, user_id, exercise_id, workout_id=None, routine_id=Non
     ).fetchone()
     always_id = always_row["substitute_exercise_id"] if always_row else None
     unavailable = unavailable_equipment(conn, user_id)
+    location = "gimnasio"
+    home_avail = set()
+    try:
+        from .casa import routine_location, load_home_available
+        location = routine_location(conn, routine_id) if routine_id else "gimnasio"
+        if location == "casa":
+            home_avail = load_home_available(conn, user_id)
+    except Exception:
+        location, home_avail = "gimnasio", set()
     progress = {}
     try:
         for r in conn.execute("SELECT exercise_id, next_weight_kg, next_reps FROM exercise_progress WHERE user_id = ?",
@@ -491,10 +504,17 @@ def rank_substitutes(conn, user_id, exercise_id, workout_id=None, routine_id=Non
             elif row["same_muscle"] and level in ("related", "other"):
                 level = "muscle"
         pref = prefs.get(cid)
+        home_doable = True
+        if location == "casa":
+            from .casa import is_home_doable
+            home_doable = is_home_doable(cand.get("name"), cand.get("equipment"), home_avail)
+            if home_doable:
+                score += HOME_FIT_BONUS
         suggested = level != "other" or row is not None or pref is not None
         if not suggested and not (include_all or needle):
             continue
         w, reps = progress.get(cid, (None, None))
+        gym_unavail = is_unavailable(cand.get("equipment"), unavailable)
         items.append({
             "exercise_id": cid,
             "name": cand["name"],
@@ -513,7 +533,8 @@ def rank_substitutes(conn, user_id, exercise_id, workout_id=None, routine_id=Non
             "previously_used": pref is not None,
             "times_used": pref["times_used"] if pref else 0,
             "always_in_routine": cid == always_id,
-            "unavailable_equipment": is_unavailable(cand.get("equipment"), unavailable),
+            "unavailable_equipment": gym_unavail or (location == "casa" and not home_doable),
+            "home_doable": home_doable if location == "casa" else None,
             "suggested_weight_kg": w,
             "suggested_reps": reps,
             "priority": 1 if score >= 85 else 2 if score >= 65 else 3,
@@ -527,6 +548,9 @@ def rank_substitutes(conn, user_id, exercise_id, workout_id=None, routine_id=Non
     if limit:
         items = items[:limit]
     orig_unavailable = is_unavailable(orig.get("equipment"), unavailable)
+    if location == "casa":
+        from .casa import is_home_doable as _ihd
+        orig_unavailable = orig_unavailable or (not _ihd(orig.get("name"), orig.get("equipment"), home_avail))
     proposed = next((i["exercise_id"] for i in items if i["suggested"] and not i["unavailable_equipment"]), None)
     return {
         "exercise_id": orig["id"],

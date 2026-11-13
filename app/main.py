@@ -30,6 +30,7 @@ from .substitutions import (
     EXERCISE_REC_COLUMNS,
 )
 from .exercise_crud import router as exercise_crud_router, ensure_crud_schema, apply_data_migrations
+from .casa import router as casa_router, ensure_casa_schema, upsert_casa_exercises
 from .push_routes import router as push_router
 from .push import init_push_db, start_scheduler, stop_scheduler
 from .auth import (
@@ -62,6 +63,7 @@ app.include_router(exercise_info_router)
 app.include_router(substitutions_router)
 app.include_router(exercise_crud_router)
 app.include_router(push_router)
+app.include_router(casa_router)
 
 app.add_api_route(
     "/api/workouts/in-progress",
@@ -222,24 +224,58 @@ async def shutdown_fase10_scheduler():
     stop_scheduler()
 
 
+
+@app.on_event("startup")
+def startup_fase12_casa():
+    # Fase 12: columna location, material de casa y ejercicios nuevos (idempotente).
+    # Las rutinas Casa A/B/C se siembran con `python -m app.seed_casa --apply`.
+    conn = get_connection()
+    try:
+        ensure_casa_schema(conn)
+        upsert_casa_exercises(conn)
+        try:
+            from .exercise_sheets import ensure_exercise_sheets
+            ensure_exercise_sheets(conn)
+        except Exception:
+            logger.exception("No se pudieron aplicar las fichas de los ejercicios de casa")
+        try:
+            from .substitutions import ensure_substitutions
+            ensure_substitutions(conn)
+        except Exception:
+            logger.exception("No se pudieron ampliar las sustituciones de casa")
+    except Exception:
+        logger.exception("No se pudo aplicar el esquema de entreno en casa; la app sigue arrancando")
+    finally:
+        conn.close()
+
+
 @app.get("/api/routines")
 def get_routines(
     user_id: str | None = None,
+    location: str | None = None,
     current_user = Depends(get_authenticated_user),
 ):
     target_user_id = resolve_target_user(current_user, user_id)
 
     conn = get_connection()
 
+    loc_filter = ""
+    params = [target_user_id]
+    if location in ("gimnasio", "casa"):
+        loc_filter = " AND COALESCE(location, 'gimnasio') = ?"
+        params.append(location)
+
     rows = conn.execute(
-        """
-        SELECT id, user_id, name, day_order, is_active, session_label, created_at
+        f"""
+        SELECT id, user_id, name, day_order, is_active, session_label, created_at,
+               COALESCE(location, 'gimnasio') AS location
         FROM routines
         WHERE user_id = ?
           AND is_active = 1
+          {loc_filter}
         ORDER BY day_order
         """,
-        (target_user_id,),
+        params,
     ).fetchall()
 
     conn.close()
@@ -263,6 +299,8 @@ def get_routine(
             r.day_order,
             r.is_active,
             r.created_at,
+            r.session_label,
+            COALESCE(r.location, 'gimnasio') AS location,
             u.name AS user_name
         FROM routines r
         JOIN users u ON u.id = r.user_id

@@ -72,3 +72,12 @@ VIDEOS = {
     'Pallof press': {'video_id': 'c-byXbLkWzY', 'title': 'Press Pallof con Banda o Polea / Ejercicio de Core isométrico', 'channel': 'Zonapablo', 'review': None},
     'Elevación de rodillas': {'video_id': 'naR7Qldgxrg', 'title': 'Elevación de rodillas colgado: así SÍ trabaja el abdomen', 'channel': 'Sergio Tejeda', 'review': 'variante colgado; el equipo del catálogo es «Peso corporal»'},
 }
+
+
+try:
+    from .casa_videos import CASA_VIDEOS
+except ImportError:
+    from casa_videos import CASA_VIDEOS
+
+VIDEOS.update(CASA_VIDEOS)
+

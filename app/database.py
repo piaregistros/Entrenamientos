@@ -531,6 +531,16 @@ def init_db() -> None:
             "ALTER TABLE workout_logs ADD COLUMN current_exercise_id TEXT"
         )
 
+    # Fase 12: ubicación de la rutina (gimnasio / casa).
+    routine_columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(routines)").fetchall()
+    }
+    if "location" not in routine_columns:
+        conn.execute(
+            "ALTER TABLE routines ADD COLUMN location TEXT NOT NULL DEFAULT 'gimnasio'"
+        )
+
     # Compatibilidad con bases de datos creadas antes de
     # la ampliación de body_metrics para composición corporal.
     body_metric_columns = {

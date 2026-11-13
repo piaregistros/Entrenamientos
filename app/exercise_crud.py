@@ -264,6 +264,7 @@ class RoutineCreateIn(BaseModel):
     user_id: str | None = None
     day_order: int | None = Field(default=None, ge=1, le=99)
     session_label: str | None = None
+    location: str | None = None
     exercises: list[RoutineExerciseIn] = []
 
 
@@ -271,6 +272,7 @@ class RoutineUpdateIn(BaseModel):
     name: str | None = None
     day_order: int | None = Field(default=None, ge=1, le=99)
     session_label: str | None = None
+    location: str | None = None
     is_active: bool | None = None
 
 
@@ -283,6 +285,15 @@ def _routine_for_edit(conn, routine_id, user):
     if r is None or (user["role"] != "admin" and r["user_id"] != user["id"]):
         raise HTTPException(status_code=404, detail="Rutina no encontrada")
     return r
+
+
+def _normalize_location(value):
+    if value is None:
+        return None
+    loc = str(value).strip().lower()
+    if loc not in ("gimnasio", "casa"):
+        raise HTTPException(status_code=400, detail="La ubicación debe ser gimnasio o casa")
+    return loc
 
 
 def _check_range(rep_min, rep_max):
@@ -349,9 +360,10 @@ def create_routine(body: RoutineCreateIn, current_user=Depends(get_authenticated
         day_order = body.day_order or conn.execute(
             "SELECT COALESCE(MAX(day_order), 0) + 1 FROM routines WHERE user_id = ?", (owner,)).fetchone()[0]
         rid = str(uuid.uuid4())
+        location = _normalize_location(body.location) or "gimnasio"
         conn.execute(
-            "INSERT INTO routines (id, user_id, name, day_order, is_active, session_label) VALUES (?, ?, ?, ?, 1, ?)",
-            (rid, owner, name, day_order, body.session_label),
+            "INSERT INTO routines (id, user_id, name, day_order, is_active, session_label, location) VALUES (?, ?, ?, ?, 1, ?, ?)",
+            (rid, owner, name, day_order, body.session_label, location),
         )
         seen = set()
         for item in body.exercises:
@@ -387,6 +399,9 @@ def update_routine(routine_id: str, body: RoutineUpdateIn, current_user=Depends(
         if "session_label" in data:
             sets.append("session_label = ?")
             params.append(data["session_label"])
+        if "location" in data:
+            sets.append("location = ?")
+            params.append(_normalize_location(data["location"]) or "gimnasio")
         if data.get("is_active") is not None:
             sets.append("is_active = ?")
             params.append(1 if data["is_active"] else 0)

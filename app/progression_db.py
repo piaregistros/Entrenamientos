@@ -150,6 +150,27 @@ def _range_from_user_routines(conn, user_id, exercise_id):
     ).fetchone()
 
 
+
+def _attach_casa_progression(conn, ex: dict, user_id=None, routine_id=None) -> dict:
+    """Kettlebells: lista de pesos del usuario. Mancuernas en rutina de casa: incremento 2,5 kg."""
+    if not user_id:
+        return ex
+    try:
+        from .casa import load_home_settings, routine_location
+        from .progression import equipment_class
+    except ImportError:
+        return ex
+    settings = load_home_settings(conn, user_id)
+    cls = equipment_class(ex.get("equipment"))
+    if cls == "kettlebell":
+        ex["weight_steps"] = settings.get("kettlebell_weights") or []
+    if routine_location(conn, routine_id) == "casa" and cls == "dumbbell":
+        inc = settings.get("dumbbell_increment_kg")
+        if inc and inc > 0:
+            ex["weight_increment_kg"] = inc
+    return ex
+
+
 def build_exercise_config(conn, exercise_id: str, routine_id=None, workout_id=None, user_id=None) -> dict:
     """Ejercicio + rango objetivo.
 
@@ -170,7 +191,7 @@ def build_exercise_config(conn, exercise_id: str, routine_id=None, workout_id=No
     ex["rep_min"] = target["target_rep_min"] if target else None
     ex["rep_max"] = target["target_rep_max"] if target else None
     ex["rir_target"] = target["target_rir"] if target else None
-    return ex
+    return _attach_casa_progression(conn, ex, user_id=user_id, routine_id=routine_id)
 
 
 def load_recent_sessions(conn, user_id: str, exercise_id: str, until_workout_id=None, limit: int = 2,

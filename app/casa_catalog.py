@@ -386,54 +386,80 @@ def merge_casa_exercises(exercises: list[dict]) -> list[dict]:
     return out
 
 
-# (nombre, orden, series, rep_min, rep_max, rir, descanso_s, is_optional, nota)
-# Las notas se documentan en el informe; no hay columna de notas en routine_exercises.
+# Fase 12c: las rutinas de casa son ESPEJO de las del gimnasio. Casa A sustituye a A, Casa B a B y
+# Casa C a C: mismo orden de patrones de movimiento y de grupos musculares, mismas series y rangos de
+# repeticiones que la rutina del gimnasio (referencia: app/seed_pablo_routines.py; la base de datos
+# real de Pablo puede haberse editado desde «Gestionar rutinas»).
+# Siempre que hay material se usa el MISMO ejercicio que en el gimnasio (así la progresión y el
+# historial se heredan solos); si no, el equivalente casero y un enlace en CASA_GYM_LINKS.
+# Se reaplican si sube CASA_ROUTINES_VERSION (ver casa.py); si no, no se tocan las ediciones del usuario.
+CASA_ROUTINES_VERSION = 2
+
+# (nombre, orden, series, rep_min, rep_max, rir, descanso_s, is_optional)
 CASA_ROUTINES = {
     "Casa A": {
         "day_order": 11,
-        "session_label": "Full body casa",
+        "gym_slot": "A",
+        "session_label": "Equivale a A",
         "location": "casa",
         "exercises": [
-            ("Peso muerto con trap bar", 1, 3, 6, 8, 2, 150, 0),
-            ("Press banca plano", 2, 3, 6, 8, 2, 150, 0),
-            ("Dominadas agarre neutro", 3, 3, 6, 10, 2, 120, 0),
-            ("Press landmine", 4, 3, 8, 10, 2, 120, 0),
-            ("Remo unilateral con mancuerna", 5, 3, 8, 10, 2, 90, 0),
-            ("Elevaciones laterales con mancuernas", 6, 3, 12, 15, 2, 75, 0),
-            ("Fondos en paralelas", 7, 2, 8, 12, 2, 90, 0),
-            ("Remo ergómetro", 8, 1, 300, 480, 2, 0, 1),
+            ("Sentadilla libre", 1, 3, 8, 10, 2, 150, 0),                      # Prensa de piernas
+            ("Press banca plano", 2, 3, 6, 8, 2, 150, 0),                      # = gimnasio
+            ("Remo con barra", 3, 3, 8, 10, 2, 120, 0),                        # Remo con pecho apoyado
+            ("Peso muerto rumano", 4, 2, 10, 12, 2, 90, 0),                     # Curl femoral
+            ("Elevaciones laterales con mancuernas", 5, 3, 12, 15, 2, 75, 0),  # Elevaciones laterales en máquina
+            ("Curl con mancuernas", 6, 2, 10, 12, 2, 75, 0),                   # Curl de bíceps en máquina
+            ("Extensión de tríceps con goma", 7, 2, 10, 12, 2, 75, 0),         # Extensión de tríceps en polea
         ],
     },
     "Casa B": {
         "day_order": 12,
-        "session_label": "Full body casa",
+        "gym_slot": "B",
+        "session_label": "Equivale a B",
         "location": "casa",
         "exercises": [
-            ("Sentadilla libre", 1, 3, 6, 8, 2, 150, 0),
-            ("Press militar con barra", 2, 3, 8, 10, 2, 120, 0),
-            ("Remo landmine (Meadows)", 3, 3, 8, 10, 2, 120, 0),
-            ("Peso muerto rumano", 4, 3, 8, 10, 2, 120, 0),
-            ("Dominadas", 5, 3, 6, 10, 2, 120, 0),
-            ("Face pull con goma", 6, 3, 12, 15, 2, 75, 0),
-            ("Plancha", 7, 2, 30, 60, 2, 60, 0),
-            ("Swing con kettlebell", 8, 3, 12, 15, 2, 60, 1),
+            ("Press de hombro con mancuernas agarre neutro", 1, 3, 8, 10, 2, 120, 0),  # = gimnasio
+            ("Sentadilla landmine", 2, 3, 8, 10, 2, 150, 0),                           # Prensa de piernas
+            ("Dominadas agarre neutro", 3, 3, 6, 10, 2, 120, 0),                       # Jalón al pecho agarre neutro
+            ("Hip thrust", 4, 3, 8, 10, 2, 120, 0),                                    # = gimnasio (barra y banco)
+            ("Face pull con goma", 5, 3, 12, 15, 2, 75, 0),                            # Face pull
+            ("Elevaciones laterales con mancuernas", 6, 2, 12, 15, 2, 75, 0),          # Elevaciones laterales en máquina
+            ("Plancha", 7, 2, 30, 60, 2, 60, 0),                                       # = gimnasio
         ],
     },
     "Casa C": {
         "day_order": 13,
-        "session_label": "Full body casa",
+        "gym_slot": "C",
+        "session_label": "Equivale a C",
         "location": "casa",
         "exercises": [
-            ("Press inclinado con barra", 1, 3, 8, 10, 2, 120, 0),
-            ("Sentadilla búlgara", 2, 3, 8, 10, 2, 120, 0),
-            ("Remo invertido en TRX", 3, 3, 8, 12, 2, 90, 0),
-            ("Hip thrust", 4, 3, 8, 10, 2, 120, 0),
-            ("Press de hombro con kettlebell", 5, 3, 8, 10, 2, 90, 0),
-            ("Curl con mancuernas", 6, 2, 10, 12, 2, 75, 0),
-            ("Extensión de tríceps en TRX", 7, 2, 10, 12, 2, 75, 0),
-            ("Paseo del granjero con kettlebells", 8, 3, 30, 45, 2, 60, 1),
+            ("Press inclinado con mancuernas 30 grados", 1, 3, 8, 10, 2, 120, 0),  # = gimnasio (banco ajustable)
+            ("Sentadilla búlgara", 2, 3, 8, 10, 2, 120, 0),                        # = gimnasio
+            ("Remo unilateral con mancuerna", 3, 3, 10, 12, 2, 90, 0),             # = gimnasio
+            ("Peso muerto rumano con mancuernas", 4, 2, 10, 12, 2, 90, 0),         # Curl femoral
+            ("Elevaciones laterales con mancuernas", 5, 3, 12, 15, 2, 75, 0),      # Elevaciones laterales en máquina
+            ("Curl con mancuernas", 6, 2, 10, 12, 2, 75, 0),                       # Curl de bíceps en máquina
+            ("Extensión de tríceps en TRX", 7, 2, 10, 12, 2, 75, 0),               # Extensión de tríceps en polea
         ],
     },
+}
+
+# Ejercicio de casa -> (ejercicio del gimnasio al que sustituye, factor).
+# Sirve para el PUNTO DE PARTIDA cuando aún no hay historial del ejercicio de casa pero sí del de
+# gimnasio: peso orientativo = factor × última carga de trabajo del gimnasio, redondeado hacia abajo
+# al incremento. Solo donde la carga es comparable; sin factor (None) solo se enlaza.
+CASA_GYM_LINKS = {
+    "Sentadilla libre": ("Prensa de piernas", 0.4),
+    "Sentadilla landmine": ("Prensa de piernas", 0.2),
+    "Remo con barra": ("Remo con pecho apoyado", 0.8),
+    "Peso muerto rumano": ("Curl femoral", 1.0),
+    "Peso muerto rumano con mancuernas": ("Curl femoral", 0.5),
+    "Elevaciones laterales con mancuernas": ("Elevaciones laterales en máquina", 0.4),
+    "Curl con mancuernas": ("Curl de bíceps en máquina", 0.4),
+    "Dominadas agarre neutro": ("Jalón al pecho agarre neutro", None),
+    "Face pull con goma": ("Face pull", None),
+    "Extensión de tríceps con goma": ("Extensión de tríceps en polea", None),
+    "Extensión de tríceps en TRX": ("Extensión de tríceps en polea", None),
 }
 
 # Parejas curadas casa ↔ gimnasio / casa ↔ casa. (a, b, score, motivo)
@@ -478,4 +504,9 @@ CASA_CURATED_PAIRS = [
     ("Dominadas", "Dominadas agarre neutro", 95, "Misma tracción vertical; cambia el agarre (amplio/prono por neutro)."),
     ("Remo invertido en TRX", "Remo con barra", 84, "Misma tracción horizontal; TRX por barra."),
     ("Press de hombro con kettlebell", "Press landmine", 90, "Mismo empuje vertical unilateral; kettlebell por landmine."),
+    # Fase 12c: huecos de las rutinas espejo
+    ("Remo con pecho apoyado", "Remo con barra", 84, "Misma tracción horizontal; con apoyo de pecho por barra."),
+    ("Remo con pecho apoyado", "Remo landmine (Meadows)", 86, "Misma tracción horizontal; apoyo de pecho por landmine."),
+    ("Curl femoral", "Peso muerto rumano", 68, "Isquiosurales; curl en máquina por bisagra de cadera con barra."),
+    ("Curl femoral", "Peso muerto rumano con mancuernas", 70, "Isquiosurales; curl en máquina por bisagra con mancuernas."),
 ]

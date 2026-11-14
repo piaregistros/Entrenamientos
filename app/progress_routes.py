@@ -256,10 +256,81 @@ def _overlap(conn, last_workout_id: str | None, next_routine_id: str | None) -> 
     return [r["name"] for r in rows]
 
 
+def _slot_letter(name: str | None) -> str | None:
+    """«Casa B» → «B». Las rutinas de casa son espejo de las del gimnasio: Casa X sustituye a X."""
+    parts = (name or "").strip().split()
+    if len(parts) >= 2 and parts[0].lower() == "casa" and len(parts[-1]) == 1 and parts[-1].isalpha():
+        return parts[-1].upper()
+    return None
+
+
+def pick_next_routine(conn, user_id: str, location: str = "gimnasio"):
+    """Siguiente rutina de la rotación A→B→C, que es UNA sola y es la del gimnasio.
+
+    Las rutinas de casa son espejo: Casa X sustituye a la X del gimnasio. Un entreno de Casa X cuenta
+    como haber hecho X (la rotación avanza igual). El «último» es el último entreno completado de
+    cualquier rutina (gimnasio o casa), traducido a su hueco A/B/C.
+    ``location='gimnasio'`` (por defecto) devuelve la rutina del gimnasio que toca; ``'casa'`` devuelve
+    su espejo de casa (para cuando Pablo elige entrenar en casa ese día).
+    Devuelve ``(next_routine_row | None, last_workout_row | None)``.
+    """
+    location = location if location in ("gimnasio", "casa") else "gimnasio"
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(routines)")}
+    loc_expr = "COALESCE(NULLIF(location, ''), 'gimnasio')" if "location" in cols else "'gimnasio'"
+    rows = conn.execute(
+        f"""
+        SELECT id, name, session_label, {loc_expr} AS loc
+        FROM routines WHERE is_active = 1 AND user_id = ? ORDER BY day_order
+        """,
+        (user_id,),
+    ).fetchall()
+    gym = [r for r in rows if r["loc"] != "casa"]
+    casa = [r for r in rows if r["loc"] == "casa"]
+    rotation = gym or casa          # sin rutinas de gimnasio, la rotación es la de casa
+    if not rotation:
+        return None, None
+
+    def slot_index_of(routine_id):
+        for i, r in enumerate(gym):
+            if r["id"] == routine_id:
+                return i
+        for i, r in enumerate(casa):
+            if r["id"] == routine_id:
+                letter = _slot_letter(r["name"])
+                idx = ord(letter) - ord("A") if letter else i
+                return idx % len(rotation)
+        return None
+
+    last_any = conn.execute(
+        """
+        SELECT id, routine_id, date FROM workout_logs
+        WHERE user_id = ? AND status = 'completed' AND routine_id IS NOT NULL
+        ORDER BY date DESC LIMIT 10
+        """,
+        (user_id,),
+    ).fetchall()
+    next_idx, last_row = 0, None
+    for w in last_any:
+        idx = slot_index_of(w["routine_id"])
+        if idx is not None:
+            next_idx, last_row = (idx + 1) % len(rotation), w
+            break
+    if location == "casa" and gym and casa:
+        mirror = None
+        for i, r in enumerate(casa):
+            letter = _slot_letter(r["name"])
+            if (ord(letter) - ord("A") if letter else i) % len(gym) == next_idx:
+                mirror = r
+                break
+        return (mirror or rotation[next_idx]), last_row
+    return rotation[next_idx], last_row
+
+
 @router.get("/home")
-def home(user_id: str, current_user=Depends(get_authenticated_user)):
+def home(user_id: str, location: str = "gimnasio", current_user=Depends(get_authenticated_user)):
     user_id = resolve_target_user(current_user, user_id)
     conn = get_connection()
+    # Último entreno completado de cualquier tipo (para «se pisan con el último entreno»).
     last = conn.execute(
         """
         SELECT id, routine_id, date, routine_id
@@ -269,21 +340,12 @@ def home(user_id: str, current_user=Depends(get_authenticated_user)):
         """,
         (user_id,),
     ).fetchone()
-    routines = conn.execute(
-        "SELECT id, name, session_label FROM routines WHERE is_active = 1 AND user_id = ? ORDER BY day_order",
-        (user_id,),
-    ).fetchall()
-    next_r = None
-    if routines:
-        if not last or not last["routine_id"]:
-            next_r = routines[0]
-        else:
-            ids = [r["id"] for r in routines]
-            try:
-                i = ids.index(last["routine_id"])
-                next_r = routines[(i + 1) % len(routines)]
-            except ValueError:
-                next_r = routines[0]
+    # La sugerencia es SIEMPRE la del gimnasio; con location=casa devuelve su espejo de casa.
+    location = location if location in ("gimnasio", "casa") else "gimnasio"
+    next_r, _last_in_rotation = pick_next_routine(conn, user_id, location)
+    gym_next = next_r
+    if location == "casa":
+        gym_next, _ = pick_next_routine(conn, user_id, "gimnasio")
     overlap = _overlap(conn, last["id"] if last else None, next_r["id"] if next_r else None)
     last_deload = conn.execute(
         """
@@ -386,9 +448,14 @@ def home(user_id: str, current_user=Depends(get_authenticated_user)):
         "last_workout_id": last["id"] if last else None,
         "next_routine_id": next_r["id"] if next_r else None,
         "next_routine_name": _shown(next_r) if next_r else None,
+        "location": location,
         "overlap": overlap,
         "tomorrow": (
-            f"Siguiente: {_shown(next_r)}."
+            (
+                f"Siguiente: {_shown(next_r)}."
+                if location == "gimnasio" or gym_next is None or gym_next["id"] == next_r["id"]
+                else f"Siguiente: {next_r['name']} (sustituye a la {gym_next['name']} del gimnasio)."
+            )
             if next_r
             else "Sin rutina activa."
         ),

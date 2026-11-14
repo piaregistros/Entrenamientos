@@ -19,6 +19,7 @@ from .casa_catalog import (
     CASA_CURATED_PAIRS,
     CASA_EXERCISES,
     CASA_ROUTINES,
+    CASA_ROUTINES_VERSION,
     DEFAULT_DUMBBELL_INCREMENT_KG,
     DEFAULT_KETTLEBELL_WEIGHTS,
     HOME_EQUIPMENT_ITEMS,
@@ -80,6 +81,17 @@ def ensure_casa_schema(conn: sqlite3.Connection) -> None:
             dumbbell_increment_kg REAL,
             updated_at TEXT,
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS casa_routine_versions (
+            user_id TEXT NOT NULL,
+            routine_name TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            applied_at TEXT,
+            PRIMARY KEY (user_id, routine_name)
         )
         """
     )
@@ -324,59 +336,87 @@ def seed_home_equipment_for_user(conn, user_id) -> str:
     return "seeded"
 
 
-def seed_casa_routines_for_user(conn, user_id) -> dict:
-    """Crea Casa A/B/C si no existen (por nombre). No modifica una rutina que ya esté."""
-    report = {"created": [], "already": []}
+def _write_casa_exercises(conn, rid, spec, ids) -> None:
+    for (exercise_name, order, sets, rmin, rmax, rir, rest, optional) in spec["exercises"]:
+        eid = ids.get(norm(exercise_name))
+        if eid is None:
+            raise ValueError(f"No se encontró el ejercicio: {exercise_name}")
+        conn.execute(
+            """
+            INSERT INTO routine_exercises (
+                id, routine_id, exercise_id, "order", target_sets,
+                target_rep_min, target_rep_max, target_rir, rest_seconds, is_optional
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (str(uuid.uuid4()), rid, eid, order, sets, rmin, rmax, rir, rest, optional),
+        )
+
+
+def seed_casa_routines_for_user(conn, user_id, force: bool = False) -> dict:
+    """Crea o ACTUALIZA Casa A/B/C (espejo de A/B/C del gimnasio). Idempotente.
+
+    - Si la rutina no existe, se crea.
+    - Si existe y su versión guardada es anterior a CASA_ROUTINES_VERSION (o ``force``), se reescribe su
+      lista de ejercicios (routine_exercises) y su etiqueta. Después se anota la versión: una segunda
+      ejecución no vuelve a tocarla, así que lo que edites luego en «Gestionar rutinas» se respeta.
+    - Nunca toca workout_logs, workout_sets ni ningún historial (las series cuelgan del ejercicio, no
+      del hueco de la rutina), ni el id de la rutina.
+    """
+    report = {"created": [], "updated": [], "already": []}
     ids = {norm(r["name"]): r["id"] for r in conn.execute("SELECT id, name FROM exercises")}
     for name, spec in CASA_ROUTINES.items():
         row = conn.execute(
             "SELECT id FROM routines WHERE user_id = ? AND name = ?",
             (user_id, name),
         ).fetchone()
-        if row:
-            # Si existe sin location, se etiqueta como casa (aditivo, no toca ejercicios).
-            conn.execute(
-                "UPDATE routines SET location = COALESCE(NULLIF(location, ''), 'casa') WHERE id = ? AND (location IS NULL OR location = '' OR location = 'gimnasio') AND name LIKE 'Casa %'",
-                (row["id"],),
-            )
-            report["already"].append(name)
-            continue
-        rid = str(uuid.uuid4())
-        conn.execute(
-            """
-            INSERT INTO routines (id, user_id, name, day_order, is_active, session_label, location)
-            VALUES (?, ?, ?, ?, 1, ?, 'casa')
-            """,
-            (rid, user_id, name, spec["day_order"], spec["session_label"]),
-        )
-        for (
-            exercise_name,
-            order,
-            sets,
-            rmin,
-            rmax,
-            rir,
-            rest,
-            optional,
-        ) in spec["exercises"]:
-            eid = ids.get(norm(exercise_name))
-            if eid is None:
-                raise ValueError(f"No se encontró el ejercicio: {exercise_name}")
+        if not row:
+            rid = str(uuid.uuid4())
             conn.execute(
                 """
-                INSERT INTO routine_exercises (
-                    id, routine_id, exercise_id, "order", target_sets,
-                    target_rep_min, target_rep_max, target_rir, rest_seconds, is_optional
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO routines (id, user_id, name, day_order, is_active, session_label, location)
+                VALUES (?, ?, ?, ?, 1, ?, 'casa')
                 """,
-                (str(uuid.uuid4()), rid, eid, order, sets, rmin, rmax, rir, rest, optional),
+                (rid, user_id, name, spec["day_order"], spec["session_label"]),
             )
-        report["created"].append(name)
-        ids  # keep quiet
+            _write_casa_exercises(conn, rid, spec, ids)
+            report["created"].append(name)
+        else:
+            rid = row["id"]
+            conn.execute(
+                "UPDATE routines SET location = 'casa' WHERE id = ? AND COALESCE(location, '') != 'casa'",
+                (rid,),
+            )
+            seen = conn.execute(
+                "SELECT version FROM casa_routine_versions WHERE user_id = ? AND routine_name = ?",
+                (user_id, name),
+            ).fetchone()
+            if force or seen is None or int(seen["version"]) < CASA_ROUTINES_VERSION:
+                # Valida antes de borrar nada: si falta un ejercicio, no se toca la rutina.
+                for item in spec["exercises"]:
+                    if ids.get(norm(item[0])) is None:
+                        raise ValueError(f"No se encontró el ejercicio: {item[0]}")
+                conn.execute("DELETE FROM routine_exercises WHERE routine_id = ?", (rid,))
+                _write_casa_exercises(conn, rid, spec, ids)
+                conn.execute(
+                    "UPDATE routines SET session_label = ?, is_active = 1 WHERE id = ?",
+                    (spec["session_label"], rid),
+                )
+                report["updated"].append(name)
+            else:
+                report["already"].append(name)
+        conn.execute(
+            """
+            INSERT INTO casa_routine_versions (user_id, routine_name, version, applied_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id, routine_name) DO UPDATE SET
+                version = excluded.version, applied_at = excluded.applied_at
+            """,
+            (user_id, name, CASA_ROUTINES_VERSION, now_iso()),
+        )
     return report
 
 
-def apply_casa_seed(conn, users=None) -> dict:
+def apply_casa_seed(conn, users=None, force: bool = False) -> dict:
     """Catálogo + rutinas + material. Idempotente."""
     ensure_casa_schema(conn)
     catalog = upsert_casa_exercises(conn)
@@ -384,7 +424,7 @@ def apply_casa_seed(conn, users=None) -> dict:
     per_user = []
     for u in users:
         eq = seed_home_equipment_for_user(conn, u["id"])
-        routines = seed_casa_routines_for_user(conn, u["id"])
+        routines = seed_casa_routines_for_user(conn, u["id"], force=force)
         per_user.append({"user_id": u["id"], "name": u.get("name"), "equipment": eq, "routines": routines})
     conn.commit()
     return {"catalog": catalog, "users": per_user}

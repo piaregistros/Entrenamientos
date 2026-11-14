@@ -157,7 +157,7 @@ def test_seed_crea_casa_abc_solo_para_pablo_y_es_idempotente(client):
             "SELECT name FROM routines WHERE user_id = ? AND name LIKE 'Casa %'", (ESTEFI_ID,)
         ).fetchall()
         assert estefi == []
-        # Cada rutina de casa tiene 7 ejercicios de trabajo y un remate opcional.
+        # Cada rutina de casa es espejo de la del gimnasio (7 huecos, sin remate opcional).
         for name, spec in CASA_ROUTINES.items():
             rid = conn.execute(
                 "SELECT id FROM routines WHERE user_id = ? AND name = ?", (PABLO_ID, name)
@@ -168,7 +168,7 @@ def test_seed_crea_casa_abc_solo_para_pablo_y_es_idempotente(client):
                 (rid,),
             ).fetchall()
             assert [r["name"] for r in exs] == [e[0] for e in spec["exercises"]]
-            assert sum(int(r["is_optional"]) for r in exs) == 1
+            assert sum(int(r["is_optional"]) for r in exs) == 0   # fase 12c: espejo de 7 huecos del gimnasio
     finally:
         conn.close()
 
@@ -198,7 +198,7 @@ def test_api_routines_filtra_por_ubicacion_y_devuelve_location(client):
     assert all(r["location"] == "gimnasio" for r in gym)
     detail = client.get(f"/api/routines/{casa[0]['id']}").json()
     assert detail["location"] == "casa"
-    assert detail["session_label"] == "Full body casa"
+    assert detail["session_label"] == "Equivale a A"
 
 
 def test_crear_y_editar_rutina_con_ubicacion_casa(client):

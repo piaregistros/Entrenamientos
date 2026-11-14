@@ -6,6 +6,8 @@ Lee configuración + historial y delega en ``progression.next_target`` (función
 """
 from __future__ import annotations
 
+import math
+
 from .progression import (
     MEASURE_TYPES,
     default_increment,
@@ -257,6 +259,39 @@ def _last_session_summary(sessions):
     }
 
 
+def _apply_gym_link_start(conn, user_id, ex, result, until_workout_id=None) -> None:
+    """Fase 12c: ejercicio de casa SIN historial que sustituye a uno de gimnasio CON historial →
+    peso de partida orientativo (factor × última carga de trabajo del gimnasio, redondeado hacia abajo
+    al incremento). Solo para ejercicios con factor definido en CASA_GYM_LINKS; no toca nada guardado."""
+    if result.get("kind") != "start" or result.get("measure_type") not in (None, "reps"):
+        return
+    try:
+        from .casa_catalog import CASA_GYM_LINKS
+    except ImportError:
+        return
+    link = CASA_GYM_LINKS.get(ex.get("name"))
+    if not link or not link[1]:
+        return
+    gym_name, factor = link
+    row = conn.execute("SELECT id FROM exercises WHERE name = ?", (gym_name,)).fetchone()
+    if not row:
+        return
+    gym_sessions = load_recent_sessions(conn, user_id, row["id"], until_workout_id=until_workout_id, limit=1)
+    last = _last_session_summary(gym_sessions)
+    if not last or not last["weight_kg"] or last["weight_kg"] <= 0:
+        return
+    inc = result.get("increment_kg") or 2.5
+    weight = math.floor(last["weight_kg"] * factor / inc + 1e-9) * inc
+    if weight <= 0:
+        return
+    result["weight_kg"] = round(float(weight), 2)
+    result["gym_link"] = {"exercise": gym_name, "weight_kg": last["weight_kg"], "factor": factor}
+    result["reason"] = (
+        f"Sin historial en casa. Punto de partida orientativo: {factor:g} × los {last['weight_kg']:g} kg "
+        f"de «{gym_name}» = {weight:g} kg. Ajústalo a cómo se sienta con {result.get('reps')} reps."
+    )
+
+
 def compute_exercise_target(conn, user_id: str, exercise_id: str, routine_id=None, workout_id=None,
                             until_workout_id=None):
     """Objetivo siguiente de un ejercicio (única fuente de verdad). Devuelve (resultado, config)."""
@@ -267,4 +302,6 @@ def compute_exercise_target(conn, user_id: str, exercise_id: str, routine_id=Non
     result["has_history"] = bool(sessions)
     result["last_workout"] = metas[0] if metas else None
     result["last_session"] = _last_session_summary(sessions)
+    if not sessions:
+        _apply_gym_link_start(conn, user_id, ex, result, until_workout_id)
     return result, ex

@@ -232,7 +232,7 @@ def _result(kind, weight, reps, reason, measure, unit, increment, fail_streak=0,
     return data
 
 
-def next_target(ex: dict, sessions: list[list[dict]]) -> dict:
+def _next_target(ex: dict, sessions: list[list[dict]]) -> dict:
     """Calcula el siguiente objetivo.
 
     ex: name, equipment, exercise_type, measure_type, weight_increment_kg, rep_min, rep_max, rir_target.
@@ -343,3 +343,11 @@ def next_target(ex: dict, sessions: list[list[dict]]) -> dict:
     if rir_low:
         reason += f" Deja {rir_target} RIR."
     return _result("add_reps", w, target, reason, measure, unit, inc)
+
+
+def next_target(ex: dict, sessions: list[list[dict]]) -> dict:
+    """Objetivo siguiente (ver ``_next_target``). Añade ``weight_steps`` (pesos fijos, p. ej. las
+    kettlebells que hay en casa) para que el cliente pueda subir/bajar de peso con los botones +/-."""
+    result = _next_target(ex, sessions)
+    result["weight_steps"] = normalize_weight_steps(ex.get("weight_steps"))
+    return result

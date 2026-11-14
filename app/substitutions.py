@@ -585,6 +585,7 @@ def recommendation_item(conn, user_id, routine_id, workout_id, slot, exercise) -
         "measure_type": result["measure_type"],
         "unit": result["unit"],
         "increment_kg": result["increment_kg"],
+        "weight_steps": result.get("weight_steps", []),
         "fail_streak": result["fail_streak"],
     }
     last_performance = None

@@ -340,3 +340,36 @@ def test_parejas_curadas_de_casa_existen_en_el_catalogo():
     merged = {(x[0], x[1]) for x in CURATED_PAIRS}
     for a, b, *_ in CASA_CURATED_PAIRS:
         assert (a, b) in merged
+
+
+# ------------------------------------------------------------------ fase 12b: pesos fijos en la recomendación
+def test_next_target_expone_los_pesos_fijos_de_las_kettlebells_aunque_no_haya_historial():
+    r = next_target(kb_ex(), [])
+    assert r["kind"] == "start"
+    assert r["weight_steps"] == sorted(DEFAULT_KETTLEBELL_WEIGHTS)
+    assert r["weight_steps"][0] == min(DEFAULT_KETTLEBELL_WEIGHTS)
+
+
+def test_next_target_sin_pesos_fijos_devuelve_lista_vacia():
+    r = next_target(kb_ex(equipment="Barra", name="Press banca plano", weight_steps=None, weight_increment_kg=2.5), [])
+    assert r["weight_steps"] == []
+
+
+def test_recommendation_item_incluye_weight_steps_de_la_kettlebell(client):
+    from app.substitutions import recommendation_item
+    seed_pablo_casa()
+    conn = get_connection()
+    try:
+        ensure_progression_schema(conn)
+        kb = conn.execute(
+            "SELECT * FROM exercises WHERE equipment = 'Kettlebell' ORDER BY name LIMIT 1"
+        ).fetchone()
+        casa = conn.execute(
+            "SELECT id FROM routines WHERE user_id = ? AND name = 'Casa A'", (PABLO_ID,)
+        ).fetchone()
+        slot = {"order": 1, "target_sets": 3, "target_rep_min": 8, "target_rep_max": 12, "target_rir": 2}
+        item = recommendation_item(conn, PABLO_ID, casa["id"], None, slot, dict(kb))
+        assert item["weight_steps"] and item["weight_steps"] == sorted(item["weight_steps"])
+        assert item["weight_steps"][0] == 8
+    finally:
+        conn.close()
